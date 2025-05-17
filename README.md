@@ -1,6 +1,4 @@
-# stock_ai
-
-주식 예측 모델 (Stock Prediction Model)
+## 주식 예측 모델 (Stock Prediction Model)
 한국 주식 시장 분석 및 예측을 위한 머신러닝 기반 도구입니다. XGBoost를 활용하여 주가 방향 예측 및 자동 트레이딩 신호를 생성합니다.
 
 주요 기능
