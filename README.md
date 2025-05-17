@@ -142,6 +142,9 @@ results = analyzer.analyze_all_stocks_parallel(
     max_stocks=30
 )
 
+# 전체 종목 분석
+max_stocks = None
+
 # 상위 종목 출력
 top_stocks = analyzer.get_top_stocks(criteria='backtest_return', top_n=5)
 print(top_stocks)
