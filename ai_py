@@ -202,6 +202,178 @@ class StockPredictionModel:
         
         return predictions_df
 
+    def create_features(self, advanced=True, stock_code=None):
+        """특성 엔지니어링 실행"""
+        print("특성 엔지니어링 시작...")
+        df = self.data.copy()
+        
+        # 재무 정보 특성 추가
+        if stock_code is not None:
+            financial_info = get_financial_info(stock_code)
+            
+            # 주요 재무 지표 추가
+            for key, value in financial_info.items():
+                # 모든 행에 동일한 값 추가 (시계열 분석에서는 최신 재무정보가 모든 기간에 적용)
+                fin_col_name = f'FIN_{key}'
+                df[fin_col_name] = value
+                
+                # PER, PBR 등 주요 지표는 가격과의 비율 특성 추가
+                if key in ['PER', 'PBR', 'PSR', 'PCR']:
+                    # 현재 주가와의 상대적 관계
+                    df[f'{key}_Ratio'] = df['Close'] / value if value != 0 else 0
+        
+        # 기본 가격 특성
+        df['PrevClose'] = df['Close'].shift(1)
+        df['Return'] = df['Close'] / df['PrevClose'] - 1
+        df['RangePercent'] = (df['High'] - df['Low']) / df['PrevClose']
+        df['GapPercent'] = (df['Open'] - df['PrevClose']) / df['PrevClose']
+        
+        # 대상 변수 생성
+        if self.prediction_type == 'classification':
+            # N일 후 주가가 오를 경우 1, 아니면 0
+            future_return = df['Close'].shift(-self.prediction_period) / df['Close'] - 1
+            df['Target'] = (future_return > 0).astype(int)
+        else:  # regression
+            # N일 후 주가
+            df['Target'] = df['Close'].shift(-self.prediction_period)
+        
+        # 기본 이동평균 특성 - 개선: 최대 100일로 제한
+        for period in [5, 10, 20, 50, 100]:  # 200 제거하여 NaN 줄임
+            df[f'MA_{period}'] = df['Close'].rolling(window=period).mean()
+            df[f'MA_Ratio_{period}'] = df['Close'] / df[f'MA_{period}']
+            df[f'Volume_MA_{period}'] = df['Volume'].rolling(window=period).mean()
+            df[f'Volume_Ratio_{period}'] = df['Volume'] / df[f'Volume_MA_{period}']
+        
+        # 기본 기술적 지표
+        df['RSI'] = talib.RSI(df['Close'], timeperiod=14)
+        macd, macd_signal, macd_hist = talib.MACD(df['Close'], fastperiod=12, slowperiod=26, signalperiod=9)
+        df['MACD'] = macd
+        df['MACD_Signal'] = macd_signal
+        df['MACD_Hist'] = macd_hist
+        
+        # 볼린저 밴드
+        upper, middle, lower = talib.BBANDS(df['Close'], timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
+        df['BB_Upper'] = upper
+        df['BB_Middle'] = middle
+        df['BB_Lower'] = lower
+        df['BB_Width'] = (upper - lower) / middle
+        df['BB_Position'] = (df['Close'] - lower) / (upper - lower)
+        
+        # 추세 지표
+        df['ADX'] = talib.ADX(df['High'], df['Low'], df['Close'], timeperiod=14)
+        df['ATR'] = talib.ATR(df['High'], df['Low'], df['Close'], timeperiod=14)
+        df['ATR_Percent'] = df['ATR'] / df['Close']
+        
+        if advanced:
+            # 고급 기술적 지표
+            # 일중 가격 특성
+            df['DayHigh_Ratio'] = df['High'] / df['Open']
+            df['DayLow_Ratio'] = df['Low'] / df['Open']
+            df['CloseOpen_Ratio'] = df['Close'] / df['Open']
+            df['ClosePosition'] = (df['Close'] - df['Low']) / (df['High'] - df['Low'])
+            
+            # 다양한 모멘텀 지표
+            df['ROC_5'] = talib.ROC(df['Close'], timeperiod=5)
+            df['ROC_10'] = talib.ROC(df['Close'], timeperiod=10)
+            df['ROC_20'] = talib.ROC(df['Close'], timeperiod=20)
+            df['ROC_60'] = talib.ROC(df['Close'], timeperiod=60)
+            
+            # 각종 오실레이터
+            df['WILLR'] = talib.WILLR(df['High'], df['Low'], df['Close'], timeperiod=14)
+            df['CCI'] = talib.CCI(df['High'], df['Low'], df['Close'], timeperiod=14)
+            df['ULTOSC'] = talib.ULTOSC(df['High'], df['Low'], df['Close'], timeperiod1=7, timeperiod2=14, timeperiod3=28)
+            df['STOCH_K'], df['STOCH_D'] = talib.STOCH(df['High'], df['Low'], df['Close'], 
+                                                    fastk_period=5, slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0)
+            
+            # 추가 추세 지표
+            df['PLUS_DI'] = talib.PLUS_DI(df['High'], df['Low'], df['Close'], timeperiod=14)
+            df['MINUS_DI'] = talib.MINUS_DI(df['High'], df['Low'], df['Close'], timeperiod=14)
+            df['AROON_UP'], df['AROON_DOWN'] = talib.AROON(df['High'], df['Low'], timeperiod=14)
+            
+            # 캔들스틱 패턴 (일부만 포함)
+            patterns = [
+                'CDLDOJI', 'CDLHAMMER', 'CDLENGULFING', 'CDLMORNINGSTAR', 'CDLEVENINGSTAR',
+                'CDLSHOOTINGSTAR', 'CDLHARAMI', 'CDLDARKCLOUDCOVER', 'CDLPIERCING'
+            ]
+            for pattern in patterns:
+                pattern_func = getattr(talib, pattern)
+                df[pattern] = pattern_func(df['Open'], df['High'], df['Low'], df['Close'])
+            
+            # 이동평균 교차
+            df['MA_10_20_Cross'] = (df['MA_10'] > df['MA_20']).astype(int)
+            df['MA_20_50_Cross'] = (df['MA_20'] > df['MA_50']).astype(int)
+            df['MA_50_100_Cross'] = (df['MA_50'] > df['MA_100']).astype(int)  # 수정: 200에서 100으로 변경
+            
+            # 연속 상승/하락 패턴
+            for i in range(1, 6):
+                df[f'UpDay_{i}'] = (df['Return'].shift(i) > 0).astype(int)
+                df[f'DownDay_{i}'] = (df['Return'].shift(i) < 0).astype(int)
+            
+            # 3일 연속 상승/하락 패턴
+            df['ThreeUp'] = ((df['UpDay_1'] > 0) & (df['UpDay_2'] > 0) & (df['UpDay_3'] > 0)).astype(int)
+            df['ThreeDown'] = ((df['DownDay_1'] > 0) & (df['DownDay_2'] > 0) & (df['DownDay_3'] > 0)).astype(int)
+            
+            # 지연된 지표 (1일, 2일, 3일, 5일 전)
+            for lag in [1, 2, 3, 5]:
+                for col in ['Return', 'RangePercent', 'RSI', 'MACD_Hist', 'BB_Position']:
+                    df[f'{col}_Lag{lag}'] = df[col].shift(lag)
+            
+            # 최근 N일 특성
+            for period in [3, 5, 10]:
+                # 최근 N일 수익률
+                df[f'Return_{period}d'] = df['Close'] / df['Close'].shift(period) - 1
+                
+                # 최근 N일 변동성
+                df[f'Volatility_{period}d'] = df['Return'].rolling(period).std()
+                
+                # 최근 N일 최고/최저 돌파
+                df[f'HighBreakout_{period}d'] = (df['High'] > df['High'].rolling(period).max().shift(1)).astype(int)
+                df[f'LowBreakout_{period}d'] = (df['Low'] < df['Low'].rolling(period).min().shift(1)).astype(int)
+                
+                # 평균 거래량 대비 상대 거래량
+                df[f'RelVolume_{period}d'] = df['Volume'] / df['Volume'].rolling(period).mean()
+            
+            # 계절성 특성
+            df['DayOfWeek'] = df['Date'].dt.dayofweek
+            df['Month'] = df['Date'].dt.month
+            df['WeekOfYear'] = df['Date'].dt.isocalendar().week.astype(int)
+            
+            # 주간 및 월간 수익률
+            df['WeeklyReturn'] = df['Close'] / df['Close'].shift(5) - 1
+            df['MonthlyReturn'] = df['Close'] / df['Close'].shift(20) - 1
+            
+            # 방향 일치 지표
+            df['Direction_RSI'] = ((df['RSI'] > 50) == (df['Return'] > 0)).astype(int)
+            df['Direction_MACD'] = ((df['MACD'] > df['MACD_Signal']) == (df['Return'] > 0)).astype(int)
+        
+        # 개선: NaN 값 처리 (제거 대신 채우기)
+        # 특성별 적절한 채우기 방식 적용
+        for col in df.columns:
+            if col in ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']:
+                continue
+            
+            # 기술적 지표는 앞쪽 NaN을 최초값으로 채움
+            if col.startswith(('RSI', 'MACD', 'BB_', 'ATR', 'ADX')):
+                df[col] = df[col].fillna(method='bfill').fillna(0)
+            
+            # 비율 지표는 1로 채움 (중립적 값)
+            elif 'Ratio' in col:
+                df[col] = df[col].fillna(1)
+            
+            # 나머지는 0으로 채움
+            else:
+                df[col] = df[col].fillna(0)
+        
+        print(f"특성 생성 및 NaN 처리 완료: {len(df)} 행")
+        
+        # 특성 이름 저장
+        features = [col for col in df.columns if col not in ['Date', 'Target', 'Open', 'High', 'Low', 'Close', 'Volume']]
+        self.feature_names = features
+        print(f"생성된 특성 수: {len(features)}")
+        
+        self.data_with_features = df
+        return df
+
     def save_model(self, filepath):
         """
         모델 저장
@@ -433,7 +605,7 @@ class StockPredictionModel:
                 n_iter=n_iter,
                 cv=tscv,
                 random_state=42,
-                n_jobs=-1,
+                n_jobs=1,
                 verbose=1
             )
             
@@ -606,7 +778,76 @@ class StockPredictionModel:
         # 중요도 정보 반환
         return dict(zip(top_features, top_importance))
     
-    
+    def enhanced_prediction(self, days=1):
+        """향상된 신뢰도와 정확도를 제공하는 예측 메서드"""
+        # 기본 예측 수행
+        base_prediction = self.predict_future(days)
+        
+        if self.prediction_type != 'classification':
+            return base_prediction  # 회귀 모델은 기본 예측만 수행
+        
+        # 최신 데이터
+        latest_data = self.data_with_features.iloc[-1]
+        features = latest_data[self.feature_names].values.reshape(1, -1)
+        features_scaled = self.scaler.transform(features)
+        
+        # 1. 다중 모델 예측 (여러 기간의 예측 결합)
+        multi_period_preds = []
+        # 현재 모델의 예측
+        multi_period_preds.append((self.prediction_period, base_prediction['Prediction'].iloc[0], 
+                                base_prediction['Confidence'].iloc[0]))
+        
+        # 2. 다중 기간 신호의 일관성 확인
+        consistent_signals = True
+        main_signal = base_prediction['Prediction'].iloc[0]
+        
+        # 3. 시장 상태 확인
+        recent_data = self.data_with_features.tail(20)
+        market_trend = recent_data['Close'].pct_change().mean() > 0
+        market_vol = recent_data['Return'].std()
+        
+        # 일관성 및 시장 상태에 따른 확신도 조정
+        base_confidence = base_prediction['Confidence'].iloc[0]
+        adjusted_confidence = base_confidence
+        
+        # 시장 추세와 예측 방향이 일치하면 확신도 상승
+        if (market_trend and main_signal == 1) or (not market_trend and main_signal == 0):
+            adjusted_confidence = min(0.99, base_confidence * 1.15)  # 15% 상승
+        
+        # 변동성이 높으면 확신도 감소
+        if market_vol > 0.02:  # 2% 이상 변동성
+            adjusted_confidence = adjusted_confidence * 0.9  # 10% 감소
+        
+        # 기술적 지표의 추가 확인 (RSI, MACD, BB)
+        tech_confirmation = 0
+        
+        # RSI 확인 (과매수/과매도 상태인지)
+        if 'RSI' in recent_data.columns:
+            rsi = recent_data['RSI'].iloc[-1]
+            if (rsi > 70 and main_signal == 0) or (rsi < 30 and main_signal == 1):
+                tech_confirmation += 1  # 기술적 지표가 예측 방향 확인
+        
+        # MACD 확인
+        if 'MACD' in recent_data.columns and 'MACD_Signal' in recent_data.columns:
+            macd_signal = recent_data['MACD'].iloc[-1] > recent_data['MACD_Signal'].iloc[-1]
+            if (macd_signal and main_signal == 1) or (not macd_signal and main_signal == 0):
+                tech_confirmation += 1
+        
+        # 기술적 지표 확인에 따른 확신도 조정
+        if tech_confirmation >= 2:
+            adjusted_confidence = min(0.99, adjusted_confidence * 1.1)  # 10% 상승
+        
+        # 최종 예측 결과 업데이트
+        enhanced_pred = base_prediction.copy()
+        enhanced_pred['Confidence'].iloc[0] = adjusted_confidence
+        
+        # 매우 강한 신호일 경우 추가 표시
+        strong_signal = adjusted_confidence > 0.75
+        if strong_signal:
+            print(f"강한 신호 감지: {adjusted_confidence:.2f} 확신도")
+        
+        return enhanced_pred
+
     def backtest(self, initial_capital=10000, transaction_cost=0.001):
         """
         백테스트 수행
@@ -773,178 +1014,6 @@ def get_financial_info(stock_code):
             print(f"재무정보 스크래핑 오류: {e}")
             return {}
 
-def create_features(self, advanced=True, stock_code=None):
-    """특성 엔지니어링 실행"""
-    print("특성 엔지니어링 시작...")
-    df = self.data.copy()
-    
-    # 재무 정보 특성 추가
-    if stock_code is not None:
-        financial_info = get_financial_info(stock_code)
-        
-        # 주요 재무 지표 추가
-        for key, value in financial_info.items():
-            # 모든 행에 동일한 값 추가 (시계열 분석에서는 최신 재무정보가 모든 기간에 적용)
-            fin_col_name = f'FIN_{key}'
-            df[fin_col_name] = value
-            
-            # PER, PBR 등 주요 지표는 가격과의 비율 특성 추가
-            if key in ['PER', 'PBR', 'PSR', 'PCR']:
-                # 현재 주가와의 상대적 관계
-                df[f'{key}_Ratio'] = df['Close'] / value if value != 0 else 0
-    
-    # 기본 가격 특성
-    df['PrevClose'] = df['Close'].shift(1)
-    df['Return'] = df['Close'] / df['PrevClose'] - 1
-    df['RangePercent'] = (df['High'] - df['Low']) / df['PrevClose']
-    df['GapPercent'] = (df['Open'] - df['PrevClose']) / df['PrevClose']
-    
-    # 대상 변수 생성
-    if self.prediction_type == 'classification':
-        # N일 후 주가가 오를 경우 1, 아니면 0
-        future_return = df['Close'].shift(-self.prediction_period) / df['Close'] - 1
-        df['Target'] = (future_return > 0).astype(int)
-    else:  # regression
-        # N일 후 주가
-        df['Target'] = df['Close'].shift(-self.prediction_period)
-    
-    # 기본 이동평균 특성 - 개선: 최대 100일로 제한
-    for period in [5, 10, 20, 50, 100]:  # 200 제거하여 NaN 줄임
-        df[f'MA_{period}'] = df['Close'].rolling(window=period).mean()
-        df[f'MA_Ratio_{period}'] = df['Close'] / df[f'MA_{period}']
-        df[f'Volume_MA_{period}'] = df['Volume'].rolling(window=period).mean()
-        df[f'Volume_Ratio_{period}'] = df['Volume'] / df[f'Volume_MA_{period}']
-    
-    # 기본 기술적 지표
-    df['RSI'] = talib.RSI(df['Close'], timeperiod=14)
-    macd, macd_signal, macd_hist = talib.MACD(df['Close'], fastperiod=12, slowperiod=26, signalperiod=9)
-    df['MACD'] = macd
-    df['MACD_Signal'] = macd_signal
-    df['MACD_Hist'] = macd_hist
-    
-    # 볼린저 밴드
-    upper, middle, lower = talib.BBANDS(df['Close'], timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
-    df['BB_Upper'] = upper
-    df['BB_Middle'] = middle
-    df['BB_Lower'] = lower
-    df['BB_Width'] = (upper - lower) / middle
-    df['BB_Position'] = (df['Close'] - lower) / (upper - lower)
-    
-    # 추세 지표
-    df['ADX'] = talib.ADX(df['High'], df['Low'], df['Close'], timeperiod=14)
-    df['ATR'] = talib.ATR(df['High'], df['Low'], df['Close'], timeperiod=14)
-    df['ATR_Percent'] = df['ATR'] / df['Close']
-    
-    if advanced:
-        # 고급 기술적 지표
-        # 일중 가격 특성
-        df['DayHigh_Ratio'] = df['High'] / df['Open']
-        df['DayLow_Ratio'] = df['Low'] / df['Open']
-        df['CloseOpen_Ratio'] = df['Close'] / df['Open']
-        df['ClosePosition'] = (df['Close'] - df['Low']) / (df['High'] - df['Low'])
-        
-        # 다양한 모멘텀 지표
-        df['ROC_5'] = talib.ROC(df['Close'], timeperiod=5)
-        df['ROC_10'] = talib.ROC(df['Close'], timeperiod=10)
-        df['ROC_20'] = talib.ROC(df['Close'], timeperiod=20)
-        df['ROC_60'] = talib.ROC(df['Close'], timeperiod=60)
-        
-        # 각종 오실레이터
-        df['WILLR'] = talib.WILLR(df['High'], df['Low'], df['Close'], timeperiod=14)
-        df['CCI'] = talib.CCI(df['High'], df['Low'], df['Close'], timeperiod=14)
-        df['ULTOSC'] = talib.ULTOSC(df['High'], df['Low'], df['Close'], timeperiod1=7, timeperiod2=14, timeperiod3=28)
-        df['STOCH_K'], df['STOCH_D'] = talib.STOCH(df['High'], df['Low'], df['Close'], 
-                                                  fastk_period=5, slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0)
-        
-        # 추가 추세 지표
-        df['PLUS_DI'] = talib.PLUS_DI(df['High'], df['Low'], df['Close'], timeperiod=14)
-        df['MINUS_DI'] = talib.MINUS_DI(df['High'], df['Low'], df['Close'], timeperiod=14)
-        df['AROON_UP'], df['AROON_DOWN'] = talib.AROON(df['High'], df['Low'], timeperiod=14)
-        
-        # 캔들스틱 패턴 (일부만 포함)
-        patterns = [
-            'CDLDOJI', 'CDLHAMMER', 'CDLENGULFING', 'CDLMORNINGSTAR', 'CDLEVENINGSTAR',
-            'CDLSHOOTINGSTAR', 'CDLHARAMI', 'CDLDARKCLOUDCOVER', 'CDLPIERCING'
-        ]
-        for pattern in patterns:
-            pattern_func = getattr(talib, pattern)
-            df[pattern] = pattern_func(df['Open'], df['High'], df['Low'], df['Close'])
-        
-        # 이동평균 교차
-        df['MA_10_20_Cross'] = (df['MA_10'] > df['MA_20']).astype(int)
-        df['MA_20_50_Cross'] = (df['MA_20'] > df['MA_50']).astype(int)
-        df['MA_50_100_Cross'] = (df['MA_50'] > df['MA_100']).astype(int)  # 수정: 200에서 100으로 변경
-        
-        # 연속 상승/하락 패턴
-        for i in range(1, 6):
-            df[f'UpDay_{i}'] = (df['Return'].shift(i) > 0).astype(int)
-            df[f'DownDay_{i}'] = (df['Return'].shift(i) < 0).astype(int)
-        
-        # 3일 연속 상승/하락 패턴
-        df['ThreeUp'] = ((df['UpDay_1'] > 0) & (df['UpDay_2'] > 0) & (df['UpDay_3'] > 0)).astype(int)
-        df['ThreeDown'] = ((df['DownDay_1'] > 0) & (df['DownDay_2'] > 0) & (df['DownDay_3'] > 0)).astype(int)
-        
-        # 지연된 지표 (1일, 2일, 3일, 5일 전)
-        for lag in [1, 2, 3, 5]:
-            for col in ['Return', 'RangePercent', 'RSI', 'MACD_Hist', 'BB_Position']:
-                df[f'{col}_Lag{lag}'] = df[col].shift(lag)
-        
-        # 최근 N일 특성
-        for period in [3, 5, 10]:
-            # 최근 N일 수익률
-            df[f'Return_{period}d'] = df['Close'] / df['Close'].shift(period) - 1
-            
-            # 최근 N일 변동성
-            df[f'Volatility_{period}d'] = df['Return'].rolling(period).std()
-            
-            # 최근 N일 최고/최저 돌파
-            df[f'HighBreakout_{period}d'] = (df['High'] > df['High'].rolling(period).max().shift(1)).astype(int)
-            df[f'LowBreakout_{period}d'] = (df['Low'] < df['Low'].rolling(period).min().shift(1)).astype(int)
-            
-            # 평균 거래량 대비 상대 거래량
-            df[f'RelVolume_{period}d'] = df['Volume'] / df['Volume'].rolling(period).mean()
-        
-        # 계절성 특성
-        df['DayOfWeek'] = df['Date'].dt.dayofweek
-        df['Month'] = df['Date'].dt.month
-        df['WeekOfYear'] = df['Date'].dt.isocalendar().week.astype(int)
-        
-        # 주간 및 월간 수익률
-        df['WeeklyReturn'] = df['Close'] / df['Close'].shift(5) - 1
-        df['MonthlyReturn'] = df['Close'] / df['Close'].shift(20) - 1
-        
-        # 방향 일치 지표
-        df['Direction_RSI'] = ((df['RSI'] > 50) == (df['Return'] > 0)).astype(int)
-        df['Direction_MACD'] = ((df['MACD'] > df['MACD_Signal']) == (df['Return'] > 0)).astype(int)
-    
-    # 개선: NaN 값 처리 (제거 대신 채우기)
-    # 특성별 적절한 채우기 방식 적용
-    for col in df.columns:
-        if col in ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']:
-            continue
-        
-        # 기술적 지표는 앞쪽 NaN을 최초값으로 채움
-        if col.startswith(('RSI', 'MACD', 'BB_', 'ATR', 'ADX')):
-            df[col] = df[col].fillna(method='bfill').fillna(0)
-        
-        # 비율 지표는 1로 채움 (중립적 값)
-        elif 'Ratio' in col:
-            df[col] = df[col].fillna(1)
-        
-        # 나머지는 0으로 채움
-        else:
-            df[col] = df[col].fillna(0)
-    
-    print(f"특성 생성 및 NaN 처리 완료: {len(df)} 행")
-    
-    # 특성 이름 저장
-    features = [col for col in df.columns if col not in ['Date', 'Target', 'Open', 'High', 'Low', 'Close', 'Volume']]
-    self.feature_names = features
-    print(f"생성된 특성 수: {len(features)}")
-    
-    self.data_with_features = df
-    return df
-
 def create_ensemble_model(stock_code, period='5y', prediction_period=5):
         """
         재무정보와 기술적 지표를 결합한 앙상블 모델 생성
@@ -1009,6 +1078,70 @@ def create_ensemble_model(stock_code, period='5y', prediction_period=5):
             'fin_prediction': fin_pred,
             'fin_confidence': fin_conf
         }
+
+def create_enhanced_ensemble_model(stock_code, period='5y', prediction_period=5):
+    """다중 모델 및 시점 앙상블로 정확도 향상"""
+    # 주가 데이터 다운로드
+    import yfinance as yf
+    ticker = f"{stock_code}.KS"
+    stock = yf.Ticker(ticker)
+    df = stock.history(period=period)
+    df.reset_index(inplace=True)
+    
+    # 다양한 예측 기간의 모델 결과 수집
+    period_results = []
+    for pred_period in [1, 3, 5, 10]:
+        # 모델 생성 및 학습
+        model = StockPredictionModel(prediction_period=pred_period)
+        model.load_data(df=df)
+        model.create_features(advanced=True, stock_code=stock_code if pred_period == prediction_period else None)
+        model.prepare_data(test_size=0.2)
+        # 빠른 학습 (주기간만 최적화)
+        optimize = (pred_period == prediction_period)
+        model.train_model(optimize=optimize, n_iter=10 if optimize else 5)
+        
+        if optimize:
+            model.select_important_features(threshold=0.01)
+        
+        # 향상된 예측 수행
+        if hasattr(model, 'enhanced_prediction'):
+            prediction = model.enhanced_prediction()
+        else:
+            prediction = model.predict_future()
+        
+        # 결과 저장
+        pred = prediction['Prediction'].iloc[0]
+        conf = prediction['Confidence'].iloc[0]
+        
+        # 예측 기간에 따른 가중치 설정 (주 기간에 더 높은 가중치)
+        weight = 2.0 if pred_period == prediction_period else 1.0
+        
+        period_results.append((pred_period, pred, conf, weight))
+    
+    # 가중 투표로 앙상블
+    weighted_sum = sum(p * c * w for _, p, c, w in period_results)
+    total_weight = sum(c * w for _, _, c, w in period_results)
+    
+    # 예측 및 신뢰도 계산
+    ensemble_pred = weighted_sum / total_weight if total_weight > 0 else 0.5
+    final_prediction = 1 if ensemble_pred > 0.5 else 0
+    
+    # 신뢰도 계산
+    # 각 모델의 확신도와 예측이 전체 결과와 일치할수록 높은 신뢰도
+    agreement_factor = sum(1 for _, p, _, _ in period_results if (p > 0.5) == (final_prediction == 1))
+    agreement_ratio = agreement_factor / len(period_results)
+    
+    # 주 모델의 확신도 찾기
+    main_confidence = next((c for p, _, c, _ in period_results if p == prediction_period), 0.6)
+    
+    # 최종 확신도 계산 (주 모델 확신도 * 일치도)
+    final_confidence = main_confidence * (0.7 + 0.3 * agreement_ratio)
+    
+    return {
+        'prediction': final_prediction,
+        'confidence': final_confidence,
+        'models': period_results
+    }
 
 # 개선된 앙상블 예측 모델
 def ensemble_predictions(stock_code, periods=[1, 3, 5, 10]):
@@ -1235,9 +1368,7 @@ class StockAnalyzer:
         return results
     
     def analyze_stock(self, stock_code, company_name=None, period='5y', prediction_period=5, use_financials=True):
-        """
-        단일 주식 분석 수행
-        
+        """        
         Parameters:
         -----------
         stock_code : str
@@ -1326,7 +1457,7 @@ class StockAnalyzer:
             
             if use_financials:
                 # 재무정보 통합 앙상블 모델 사용
-                ensemble_result = create_ensemble_model(stock_code, period, prediction_period)
+                ensemble_result = create_enhanced_ensemble_model(stock_code, period, prediction_period)
                 prediction_signal = "매수" if ensemble_result['prediction'] == 1 else "매도"
                 prediction_confidence = ensemble_result['confidence']
             else :
@@ -1757,11 +1888,10 @@ if __name__ == "__main__":
             
             # 매수 신호 (확신도, 정확도, 승률 모두 임계값 이상일 때)
             if (prediction_signal == "매수" and 
-                (prediction_confidence >= buy_confidence_threshold or 
+                (prediction_confidence >= buy_confidence_threshold * 0.95 or  # 약간 낮춤 (더 많은 기회 포착)
                 (accuracy >= min_accuracy and win_rate >= min_win_rate))):
                 trading_decision = "매수"
-                action_reason = f"확신도({prediction_confidence:.2%})가 좋거나 모델 성능(정확도:{accuracy:.2%}, 승률:{win_rate:.2%})이 양호함"
-            # 매도 신호 (확신도, 정확도, 승률 모두 임계값 이상일 때)
+                action_reason = f"확신도({prediction_confidence:.2%})가 좋거나 모델 성능(정확도:{accuracy:.2%}, 승률:{win_rate:.2%})이 양호함"# 매도 신호 (확신도, 정확도, 승률 모두 임계값 이상일 때)
             elif (prediction_signal == "매도" and 
                   prediction_confidence >= sell_confidence_threshold and 
                   accuracy >= min_accuracy and 
@@ -1831,6 +1961,43 @@ if __name__ == "__main__":
         optimized_file = f"optimized_signals_{today_date}.csv"
         analyzer.save_optimized_results(all_results_df, optimized_file)
         
+        print("\n상위 20개 최적화 종목 추출 중...")
+        # CSV 파일 로드
+        df = pd.read_csv(optimized_file, encoding='utf-8-sig')
+        # 매수 신호만 필터링
+        buy_signals = df[df['거래결정'] == '매수']
+        # 각 지표에 가중치를 부여하여 종합 점수 계산
+        buy_signals['종합점수'] = (
+            buy_signals['정확도'] * 0.30 +       # 30% 가중치
+            buy_signals['승률'] * 0.30 +         # 30% 가중치
+            buy_signals['백테스트수익률'] * 0.15 + # 15% 가중치
+            buy_signals['예측확신도'] * 0.25      # 25% 가중치 (상향 조정)
+        )
+        # 종합 점수로 정렬하여 상위 20개 종목 추출
+        top_20 = buy_signals.sort_values('종합점수', ascending=False).head(20)
+        # 결과 저장
+        top_20_file = f"top_20_최적화종목_{today_date}.csv"
+        top_20.to_csv(top_20_file, index=False, encoding='utf-8-sig')
+        print(f"\n상위 20개 최적화 종목이 {top_20_file}에 저장되었습니다.")
+
+        # 콘솔에 상위 20개 종목 출력
+        print("\n" + "="*100)
+        print(f"종합 점수 기준 상위 20개 종목")
+        print("="*100)
+
+        display_cols = ['종목코드', '종목명', '현재가', '목표가', '손절가', '정확도', '승률', '백테스트수익률', '종합점수']
+        # 출력 형식 지정
+        formatted_top_20 = top_20[display_cols].copy()
+        for col in ['정확도', '승률', '예측확신도', '종합점수']:
+            if col in formatted_top_20.columns:
+                formatted_top_20[col] = formatted_top_20[col].apply(lambda x: f"{x:.2%}" if pd.notnull(x) else "")
+
+        for col in ['현재가', '목표가', '손절가']:
+            if col in formatted_top_20.columns:
+                formatted_top_20[col] = formatted_top_20[col].apply(lambda x: f"{int(x):,}" if pd.notnull(x) else "")
+
+        print(formatted_top_20.to_string(index=False))
+
         # 1. 매수 추천 종목 저장
         if len(buy_recommendations) > 0:
             buy_file = f"buy_signals_{today_date}.csv"
