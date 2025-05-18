@@ -1239,6 +1239,45 @@ class StockAnalyzer:
                 'company': ['삼성전자', 'SK하이닉스', '카카오', 'LG화학', 'NAVER']
             })
 
+    # StockAnalyzer 클래스 내부에 추가 (다른 메서드들과 같은 레벨에)
+    def analyze_in_batches(self, stock_codes, batch_size=10, period='1y', prediction_period=5, workers=4):
+        """종목을 배치로 나누어 분석"""
+        import gc
+        all_results = {}
+        
+        # 배치로 나누기
+        if isinstance(stock_codes, pd.DataFrame):
+            codes_list = list(zip(stock_codes['code'], stock_codes['company']))
+        else:
+            codes_list = [(code, None) for code in stock_codes]
+            
+        total_batches = (len(codes_list) + batch_size - 1) // batch_size
+        
+        for i in range(0, len(codes_list), batch_size):
+            batch = codes_list[i:i+batch_size]
+            batch_df = pd.DataFrame(batch, columns=['code', 'company'])
+            
+            print(f"\n배치 {i//batch_size + 1}/{total_batches} 처리 중... ({len(batch)}개 종목)")
+            
+            # 현재 배치 분석
+            batch_results = self.analyze_all_stocks_parallel(
+                stock_codes=batch_df,
+                period=period,
+                prediction_period=prediction_period,
+                workers=workers
+            )
+            
+            # 결과 병합
+            all_results.update(batch_results)
+            
+            # 메모리 정리
+            gc.collect()
+            print(f"배치 {i//batch_size + 1} 완료, 현재까지 {len(all_results)}개 분석됨")
+        
+        # 결과 저장
+        self.analysis_results.update(all_results)
+        return all_results
+
     def download_stock_data(self, stock_code, period='5y', proxy=None):  # 개선: 기본값 5y로 변경
         """
         Yahoo Finance에서 주식 데이터 다운로드
@@ -1825,38 +1864,6 @@ def integrate_multiple_data_sources(stock_code):
 
     return combined_data
 
-    def analyze_in_batches(analyzer, stock_codes, batch_size=10, period='1y', prediction_period=5, workers=4):
-        """종목을 배치로 나누어 분석"""
-        import gc
-        all_results = {}
-        
-        # 배치로 나누기
-        codes_list = list(zip(stock_codes['code'], stock_codes['company']))
-        total_batches = (len(codes_list) + batch_size - 1) // batch_size
-        
-        for i in range(0, len(codes_list), batch_size):
-            batch = codes_list[i:i+batch_size]
-            batch_df = pd.DataFrame(batch, columns=['code', 'company'])
-            
-            print(f"\n배치 {i//batch_size + 1}/{total_batches} 처리 중... ({len(batch)}개 종목)")
-            
-            # 현재 배치 분석
-            batch_results = analyzer.analyze_all_stocks_parallel(
-                stock_codes=batch_df,
-                period=period,
-                prediction_period=prediction_period,
-                workers=workers
-            )
-            
-            # 결과 병합
-            all_results.update(batch_results)
-            
-            # 메모리 정리
-            gc.collect()
-            print(f"배치 {i//batch_size + 1} 완료, 현재까지 {len(all_results)}개 분석됨")
-        
-        return all_results
-
 if __name__ == "__main__":
     try:
         print("전체 주식 분석 시작...")
@@ -1901,8 +1908,8 @@ if __name__ == "__main__":
         #     workers=4 # 작업자 수
         # )
 
-        results = analyze_in_batches(
-            analyzer=analyzer,
+        results = analyzer.analyze_in_batches(
+            #analyzer=analyzer,
             stock_codes=krx_stocks,
             batch_size=20,  # 각 배치당 20개 종목 (총배치 = 전체 종목 수 / 배치 크기 (2500/20))
             period='1y',    # 데이터 기간 축소
