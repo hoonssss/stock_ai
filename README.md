@@ -56,6 +56,31 @@ model = StockPredictionModel(
     confidence_threshold=0.6           # 매매 신호 확신도 임계값
 )
 
+# 코랩
+# TA-Lib C 라이브러리 설치 (NumPy 다운그레이드 없이)
+!wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz -q
+
+!tar -xzvf ta-lib-0.4.0-src.tar.gz > /dev/null 2>&1
+
+%cd ta-lib
+
+!./configure --prefix=/usr > /dev/null 2>&1
+
+!make > /dev/null 2>&1
+
+!make install > /dev/null 2>&1
+
+%cd ..
+
+# Anaconda 패키지 사용 (Python 3.11 호환)
+!pip install conda-package-handling
+!wget https://anaconda.org/conda-forge/ta-lib/0.5.1/download/linux-64/ta-lib-0.5.1-py311h9ecbd09_0.conda
+!cph x ta-lib-0.5.1-py311h9ecbd09_0.conda
+!mv ./ta-lib-0.5.1-py311h9ecbd09_0/lib/python3.11/site-packages/talib /usr/local/lib/python3.11/dist-packages/
+
+# scikit-learn 재설치 (의존성 충돌 해결)
+!pip install --upgrade scikit-learn joblib
+
 # 데이터 로드
 model.load_data(df=stock_data)
 
