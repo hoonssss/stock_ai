@@ -1,3 +1,13 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime, timedelta
+import pickle
+import warnings
+import os
+from matplotlib.dates import DateFormatter
+
 # 데이터 처리 및 모델링
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split, RandomizedSearchCV, TimeSeriesSplit
@@ -15,9 +25,8 @@ import yfinance as yf
 import time
 from tqdm import tqdm
 
-# 병렬 처리 
+# 병렬 처리
 from concurrent.futures import ProcessPoolExecutor, as_completed
-
 
 warnings.filterwarnings('ignore')
 
@@ -25,7 +34,7 @@ class StockPredictionModel:
     def __init__(self, prediction_type='classification', prediction_period=5, confidence_threshold=0.6):
         """
         주식 예측 모델 초기화
-        
+
         Parameters:
         -----------
         prediction_type : str
@@ -42,18 +51,18 @@ class StockPredictionModel:
         self.scaler = StandardScaler()
         self.feature_names = []
         self.test_accuracy = None
-        
+
     def load_data(self, filepath=None, df=None):
         """
         데이터 로드 (파일 또는 데이터프레임)
-        
+
         Parameters:
         -----------
         filepath : str, optional
             데이터 파일 경로 (CSV)
         df : DataFrame, optional
             직접 데이터프레임 전달
-            
+
         Returns:
         --------
         DataFrame
@@ -71,24 +80,24 @@ class StockPredictionModel:
                 self.data = self.data.sort_values('Date')
         else:
             raise ValueError("파일 경로 또는 데이터프레임을 제공해야 합니다.")
-            
+
         # OHLCV 데이터 존재 확인
         required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
         if not all(col in self.data.columns for col in required_cols):
             raise ValueError(f"데이터에 필요한 열이 없습니다: {required_cols}")
-            
+
         print(f"데이터 로드 완료: {len(self.data)} 행")
         return self.data
-    
+
     def prepare_data(self, test_size=0.2):
         """
         모델링을 위한 데이터 준비
-        
+
         Parameters:
         -----------
         test_size : float
             테스트 데이터 비율
-            
+
         Returns:
         --------
         tuple
@@ -96,9 +105,9 @@ class StockPredictionModel:
         """
         if not hasattr(self, 'data_with_features'):
             raise ValueError("먼저 create_features() 메서드를 호출하세요.")
-            
+
         df = self.data_with_features.copy()
-        
+
         # 특성 및 타겟 분리
         X = df[self.feature_names]
         y = df['Target']
@@ -113,64 +122,64 @@ class StockPredictionModel:
             # 나머지는 0으로 채움
             else:
                 X[col] = X[col].fillna(0)
-        
+
         print(f"무한대 및 NaN 값 처리 완료")
 
         # 시계열 분할 (최근 데이터를 테스트 세트로)
         split_idx = int(len(df) * (1 - test_size))
         X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
         y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-        
+
         # 날짜 저장 (나중에 시각화에 사용)
         self.test_dates = df['Date'].iloc[split_idx:].reset_index(drop=True)
-        
+
         # 특성 스케일링
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
-        
+
         # DataFrame으로 변환 (특성 이름 유지)
         X_train_scaled = pd.DataFrame(X_train_scaled, columns=X_train.columns)
         X_test_scaled = pd.DataFrame(X_test_scaled, columns=X_test.columns)
-        
+
         print(f"학습 데이터: {X_train_scaled.shape}, 테스트 데이터: {X_test_scaled.shape}")
-        
+
         self.X_train, self.X_test, self.y_train, self.y_test = X_train_scaled, X_test_scaled, y_train, y_test
         return X_train_scaled, X_test_scaled, y_train, y_test
-    
+
     def predict_future(self, days=1):
         if self.model is None:
             raise ValueError("먼저 train_model() 메서드를 호출하세요.")
-            
+
         # 최신 데이터 가져오기
         latest_data = self.data_with_features.iloc[-1]
         latest_date = latest_data['Date']
         latest_price = latest_data['Close']
-        
+
         print(f"최신 날짜: {latest_date.strftime('%Y-%m-%d')}")
         print(f"최신 가격: {latest_price:.2f}")
-        
+
         # 예측 결과 저장을 위한 데이터프레임
         predictions_df = pd.DataFrame({
             'Date': [latest_date + timedelta(days=i+1) for i in range(days)],
             'Prediction': [None] * days,
             'Confidence': [None] * days
         })
-        
+
         # 향후 1일 동안의 예측만 수행 (장기 예측은 불확실성이 높음)
         features = latest_data[self.feature_names].values.reshape(1, -1)
         features_scaled = self.scaler.transform(features)
-        
+
         if self.prediction_type == 'classification':
             # 상승/하락 확률
             proba = self.model.predict_proba(features_scaled)[0, 1]
             prediction = 1 if proba > 0.5 else 0
-            
+
             predictions_df.iloc[0, 1] = prediction
             predictions_df.iloc[0, 2] = proba
-            
+
             direction = "상승" if prediction == 1 else "하락"
             print(f"향후 {self.prediction_period}일 예측: {direction} (확신도: {proba:.4f})")
-            
+
             # 신호 판단
             signal = "매수" if proba > self.confidence_threshold else "관망"
             print(f"추천 신호: {signal}")
@@ -178,46 +187,46 @@ class StockPredictionModel:
             # 가격 예측
             price_pred = self.model.predict(features_scaled)[0]
             predictions_df.iloc[0, 1] = price_pred
-            
+
             # 확신도 대신 예상 수익률 계산
             expected_return = price_pred / latest_price - 1
             predictions_df.iloc[0, 2] = expected_return
-            
+
             print(f"향후 {self.prediction_period}일 예상 가격: {price_pred:.2f}")
             print(f"예상 수익률: {expected_return:.4f} ({expected_return * 100:.2f}%)")
-            
+
             # 신호 판단
             signal = "매수" if expected_return > 0.01 else "관망"  # 1% 이상 상승 예상 시 매수
             print(f"추천 신호: {signal}")
-        
+
         return predictions_df
 
     def create_features(self, advanced=True, stock_code=None):
         """특성 엔지니어링 실행"""
         print("특성 엔지니어링 시작...")
         df = self.data.copy()
-        
+
         # 재무 정보 특성 추가
         if stock_code is not None:
             financial_info = get_financial_info(stock_code)
-            
+
             # 주요 재무 지표 추가
             for key, value in financial_info.items():
                 # 모든 행에 동일한 값 추가 (시계열 분석에서는 최신 재무정보가 모든 기간에 적용)
                 fin_col_name = f'FIN_{key}'
                 df[fin_col_name] = value
-                
+
                 # PER, PBR 등 주요 지표는 가격과의 비율 특성 추가
                 if key in ['PER', 'PBR', 'PSR', 'PCR']:
                     # 현재 주가와의 상대적 관계
                     df[f'{key}_Ratio'] = df['Close'] / value if value != 0 else 0
-        
+
         # 기본 가격 특성
         df['PrevClose'] = df['Close'].shift(1)
         df['Return'] = df['Close'] / df['PrevClose'] - 1
         df['RangePercent'] = (df['High'] - df['Low']) / df['PrevClose']
         df['GapPercent'] = (df['Open'] - df['PrevClose']) / df['PrevClose']
-        
+
         # 대상 변수 생성
         if self.prediction_type == 'classification':
             # N일 후 주가가 오를 경우 1, 아니면 0
@@ -226,21 +235,21 @@ class StockPredictionModel:
         else:  # regression
             # N일 후 주가
             df['Target'] = df['Close'].shift(-self.prediction_period)
-        
+
         # 기본 이동평균 특성 - 개선: 최대 100일로 제한
         for period in [5, 10, 20, 50, 100]:  # 200 제거하여 NaN 줄임
             df[f'MA_{period}'] = df['Close'].rolling(window=period).mean()
             df[f'MA_Ratio_{period}'] = df['Close'] / df[f'MA_{period}']
             df[f'Volume_MA_{period}'] = df['Volume'].rolling(window=period).mean()
             df[f'Volume_Ratio_{period}'] = df['Volume'] / df[f'Volume_MA_{period}']
-        
+
         # 기본 기술적 지표
         df['RSI'] = talib.RSI(df['Close'], timeperiod=14)
         macd, macd_signal, macd_hist = talib.MACD(df['Close'], fastperiod=12, slowperiod=26, signalperiod=9)
         df['MACD'] = macd
         df['MACD_Signal'] = macd_signal
         df['MACD_Hist'] = macd_hist
-        
+
         # 볼린저 밴드
         upper, middle, lower = talib.BBANDS(df['Close'], timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
         df['BB_Upper'] = upper
@@ -248,12 +257,12 @@ class StockPredictionModel:
         df['BB_Lower'] = lower
         df['BB_Width'] = (upper - lower) / middle
         df['BB_Position'] = (df['Close'] - lower) / (upper - lower)
-        
+
         # 추세 지표
         df['ADX'] = talib.ADX(df['High'], df['Low'], df['Close'], timeperiod=14)
         df['ATR'] = talib.ATR(df['High'], df['Low'], df['Close'], timeperiod=14)
         df['ATR_Percent'] = df['ATR'] / df['Close']
-        
+
         if advanced:
             # 고급 기술적 지표
             # 일중 가격 특성
@@ -261,25 +270,25 @@ class StockPredictionModel:
             df['DayLow_Ratio'] = df['Low'] / df['Open']
             df['CloseOpen_Ratio'] = df['Close'] / df['Open']
             df['ClosePosition'] = (df['Close'] - df['Low']) / (df['High'] - df['Low'])
-            
+
             # 다양한 모멘텀 지표
             df['ROC_5'] = talib.ROC(df['Close'], timeperiod=5)
             df['ROC_10'] = talib.ROC(df['Close'], timeperiod=10)
             df['ROC_20'] = talib.ROC(df['Close'], timeperiod=20)
             df['ROC_60'] = talib.ROC(df['Close'], timeperiod=60)
-            
+
             # 각종 오실레이터
             df['WILLR'] = talib.WILLR(df['High'], df['Low'], df['Close'], timeperiod=14)
             df['CCI'] = talib.CCI(df['High'], df['Low'], df['Close'], timeperiod=14)
             df['ULTOSC'] = talib.ULTOSC(df['High'], df['Low'], df['Close'], timeperiod1=7, timeperiod2=14, timeperiod3=28)
-            df['STOCH_K'], df['STOCH_D'] = talib.STOCH(df['High'], df['Low'], df['Close'], 
+            df['STOCH_K'], df['STOCH_D'] = talib.STOCH(df['High'], df['Low'], df['Close'],
                                                     fastk_period=5, slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0)
-            
+
             # 추가 추세 지표
             df['PLUS_DI'] = talib.PLUS_DI(df['High'], df['Low'], df['Close'], timeperiod=14)
             df['MINUS_DI'] = talib.MINUS_DI(df['High'], df['Low'], df['Close'], timeperiod=14)
             df['AROON_UP'], df['AROON_DOWN'] = talib.AROON(df['High'], df['Low'], timeperiod=14)
-            
+
             # 캔들스틱 패턴 (일부만 포함)
             patterns = [
                 'CDLDOJI', 'CDLHAMMER', 'CDLENGULFING', 'CDLMORNINGSTAR', 'CDLEVENINGSTAR',
@@ -288,86 +297,86 @@ class StockPredictionModel:
             for pattern in patterns:
                 pattern_func = getattr(talib, pattern)
                 df[pattern] = pattern_func(df['Open'], df['High'], df['Low'], df['Close'])
-            
+
             # 이동평균 교차
             df['MA_10_20_Cross'] = (df['MA_10'] > df['MA_20']).astype(int)
             df['MA_20_50_Cross'] = (df['MA_20'] > df['MA_50']).astype(int)
             df['MA_50_100_Cross'] = (df['MA_50'] > df['MA_100']).astype(int)  # 수정: 200에서 100으로 변경
-            
+
             # 연속 상승/하락 패턴
             for i in range(1, 6):
                 df[f'UpDay_{i}'] = (df['Return'].shift(i) > 0).astype(int)
                 df[f'DownDay_{i}'] = (df['Return'].shift(i) < 0).astype(int)
-            
+
             # 3일 연속 상승/하락 패턴
             df['ThreeUp'] = ((df['UpDay_1'] > 0) & (df['UpDay_2'] > 0) & (df['UpDay_3'] > 0)).astype(int)
             df['ThreeDown'] = ((df['DownDay_1'] > 0) & (df['DownDay_2'] > 0) & (df['DownDay_3'] > 0)).astype(int)
-            
+
             # 지연된 지표 (1일, 2일, 3일, 5일 전)
             for lag in [1, 2, 3, 5]:
                 for col in ['Return', 'RangePercent', 'RSI', 'MACD_Hist', 'BB_Position']:
                     df[f'{col}_Lag{lag}'] = df[col].shift(lag)
-            
+
             # 최근 N일 특성
             for period in [3, 5, 10]:
                 # 최근 N일 수익률
                 df[f'Return_{period}d'] = df['Close'] / df['Close'].shift(period) - 1
-                
+
                 # 최근 N일 변동성
                 df[f'Volatility_{period}d'] = df['Return'].rolling(period).std()
-                
+
                 # 최근 N일 최고/최저 돌파
                 df[f'HighBreakout_{period}d'] = (df['High'] > df['High'].rolling(period).max().shift(1)).astype(int)
                 df[f'LowBreakout_{period}d'] = (df['Low'] < df['Low'].rolling(period).min().shift(1)).astype(int)
-                
+
                 # 평균 거래량 대비 상대 거래량
                 df[f'RelVolume_{period}d'] = df['Volume'] / df['Volume'].rolling(period).mean()
-            
+
             # 계절성 특성
             df['DayOfWeek'] = df['Date'].dt.dayofweek
             df['Month'] = df['Date'].dt.month
             df['WeekOfYear'] = df['Date'].dt.isocalendar().week.astype(int)
-            
+
             # 주간 및 월간 수익률
             df['WeeklyReturn'] = df['Close'] / df['Close'].shift(5) - 1
             df['MonthlyReturn'] = df['Close'] / df['Close'].shift(20) - 1
-            
+
             # 방향 일치 지표
             df['Direction_RSI'] = ((df['RSI'] > 50) == (df['Return'] > 0)).astype(int)
             df['Direction_MACD'] = ((df['MACD'] > df['MACD_Signal']) == (df['Return'] > 0)).astype(int)
-        
+
         # 개선: NaN 값 처리 (제거 대신 채우기)
         # 특성별 적절한 채우기 방식 적용
         for col in df.columns:
             if col in ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']:
                 continue
-            
+
             # 기술적 지표는 앞쪽 NaN을 최초값으로 채움
             if col.startswith(('RSI', 'MACD', 'BB_', 'ATR', 'ADX')):
                 df[col] = df[col].fillna(method='bfill').fillna(0)
-            
+
             # 비율 지표는 1로 채움 (중립적 값)
             elif 'Ratio' in col:
                 df[col] = df[col].fillna(1)
-            
+
             # 나머지는 0으로 채움
             else:
                 df[col] = df[col].fillna(0)
-        
+
         print(f"특성 생성 및 NaN 처리 완료: {len(df)} 행")
-        
+
         # 특성 이름 저장
         features = [col for col in df.columns if col not in ['Date', 'Target', 'Open', 'High', 'Low', 'Close', 'Volume']]
         self.feature_names = features
         print(f"생성된 특성 수: {len(features)}")
-        
+
         self.data_with_features = df
         return df
 
     def save_model(self, filepath):
         """
         모델 저장
-        
+
         Parameters:
         -----------
         filepath : str
@@ -375,7 +384,7 @@ class StockPredictionModel:
         """
         if self.model is None:
             raise ValueError("먼저 train_model() 메서드를 호출하세요.")
-            
+
         # 모델 객체 저장
         model_data = {
             'model': self.model,
@@ -386,26 +395,26 @@ class StockPredictionModel:
             'confidence_threshold': self.confidence_threshold,
             'test_accuracy': self.test_accuracy
         }
-        
+
         # 디렉토리 생성
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        
+
         # 모델 저장
         with open(filepath, 'wb') as f:
             pickle.dump(model_data, f)
-            
+
         print(f"모델 저장 완료: {filepath}")
 
     @classmethod
     def load_model(cls, filepath):
         """
         저장된 모델 로드
-        
+
         Parameters:
         -----------
         filepath : str
             모델 파일 경로
-            
+
         Returns:
         --------
         StockPredictionModel
@@ -414,56 +423,56 @@ class StockPredictionModel:
         # 모델 파일 로드
         with open(filepath, 'rb') as f:
             model_data = pickle.load(f)
-        
+
         # 모델 객체 생성
         prediction_type = model_data['prediction_type']
         prediction_period = model_data['prediction_period']
         confidence_threshold = model_data['confidence_threshold']
-        
+
         model_instance = cls(
             prediction_type=prediction_type,
             prediction_period=prediction_period,
             confidence_threshold=confidence_threshold
         )
-        
+
         # 모델 속성 설정
         model_instance.model = model_data['model']
         model_instance.scaler = model_data['scaler']
         model_instance.feature_names = model_data['feature_names']
         model_instance.test_accuracy = model_data.get('test_accuracy')
-        
+
         print(f"모델 로드 완료: {filepath}")
         print(f"예측 유형: {prediction_type}")
         print(f"예측 기간: {prediction_period}일")
-        
+
         return model_instance
-    
+
     def select_important_features(self, threshold=0.01):
         """중요도가 높은 특성만 선택하고 스케일러 업데이트"""
         if self.model is None:
             raise ValueError("먼저 train_model() 메서드를 호출하세요.")
-            
+
         # 특성 중요도 계산
         importance = self.model.feature_importances_
         feature_importance = dict(zip(self.feature_names, importance))
-        
+
         # 중요도 높은 특성만 선택
-        selected_features = [f for f, imp in feature_importance.items() 
+        selected_features = [f for f, imp in feature_importance.items()
                             if imp >= threshold]
-        
+
         print(f"선택된 중요 특성: {len(selected_features)}/{len(self.feature_names)}")
-        
+
         # 스케일링되지 않은 원본 데이터 가져오기
         if hasattr(self, 'data_with_features'):
             df = self.data_with_features
-            
+
             # 특성 및 타겟 분리
             X_raw = df[self.feature_names]
             y = df['Target']
-            
+
             # 선택된 특성만 필터링
             X_raw_selected = X_raw[selected_features]
-            
+
             # 시계열 분할 (원본 prepare_data에서와 동일하게)
             test_size = 0.2
             split_idx = int(len(df) * (1 - test_size))
@@ -471,45 +480,45 @@ class StockPredictionModel:
             X_test_raw = X_raw_selected.iloc[split_idx:]
             y_train = y.iloc[:split_idx]
             y_test = y.iloc[split_idx:]
-            
+
             # 새로운 스케일러 생성 및 학습
             self.scaler = StandardScaler()
             X_train_scaled = self.scaler.fit_transform(X_train_raw)
             X_test_scaled = self.scaler.transform(X_test_raw)
-            
+
             # DataFrame으로 변환
             X_train_scaled = pd.DataFrame(X_train_scaled, columns=X_train_raw.columns)
             X_test_scaled = pd.DataFrame(X_test_scaled, columns=X_test_raw.columns)
-            
+
             # 기존 데이터 업데이트
             self.X_train = X_train_scaled
             self.X_test = X_test_scaled
             self.y_train = y_train
             self.y_test = y_test
-            
+
             # 특성 이름 업데이트
             self.feature_names = selected_features
-            
+
             # 모델 재학습
             print("특성 선택 후 모델 재학습...")
             self.train_model(optimize=False)
         else:
             print("경고: 원본 데이터를 찾을 수 없어 스케일러를 업데이트할 수 없습니다.")
             self.feature_names = selected_features
-        
+
         return selected_features
-    
+
     def train_model(self, optimize=True, n_iter=20):  # 개선: optimize=True로 변경
         """
         XGBoost 모델 학습
-        
+
         Parameters:
         -----------
         optimize : bool
             하이퍼파라미터 최적화 수행 여부
         n_iter : int
             최적화 시 시도할 파라미터 조합 수
-            
+
         Returns:
         --------
         object
@@ -517,18 +526,18 @@ class StockPredictionModel:
         """
         if not hasattr(self, 'X_train'):
             raise ValueError("먼저 prepare_data() 메서드를 호출하세요.")
-            
+
         print("모델 학습 시작...")
-        
+
         # XGBoost 경고 메시지 억제
         import warnings
         warnings.filterwarnings("ignore", message="Dataset is empty, or contains only positive or negative samples")
-        
+
         # 클래스 비율 확인
         if self.prediction_type == 'classification':
             class_counts = self.y_train.value_counts()
             print(f"학습 데이터 클래스 분포: {dict(class_counts)}")
-            
+
             # 클래스 불균형이 심한 경우 가중치 조정
             if len(class_counts) > 1:
                 scale_pos_weight = class_counts[0] / class_counts[1] if 1 in class_counts and 0 in class_counts else 1
@@ -536,7 +545,7 @@ class StockPredictionModel:
                 scale_pos_weight = 1
         else:
             scale_pos_weight = 1
-        
+
         # 기본 파라미터
         if self.prediction_type == 'classification':
             params = {
@@ -569,10 +578,10 @@ class StockPredictionModel:
                 'random_state': 42
             }
             model = xgb.XGBRegressor(**params)
-        
+
         if optimize:
             print("하이퍼파라미터 최적화 수행 중...")
-            
+
             # 파라미터 그리드
             param_grid = {
                 'learning_rate': [0.01, 0.05, 0.1, 0.2],
@@ -584,10 +593,10 @@ class StockPredictionModel:
                 'reg_alpha': [0, 0.1, 0.5, 1],
                 'reg_lambda': [0.1, 0.5, 1, 2]
             }
-            
+
             # 시계열 교차 검증
             tscv = TimeSeriesSplit(n_splits=5)
-            
+
             # RandomizedSearchCV
             random_search = RandomizedSearchCV(
                 estimator=model,
@@ -595,30 +604,30 @@ class StockPredictionModel:
                 n_iter=n_iter,
                 cv=tscv,
                 random_state=42,
-                n_jobs=1,
-                verbose=1
+                n_jobs=2, # 병렬처리 부분 1이면 순차 -1 이면 병렬처리 2면 중간
+                verbose=1 
             )
-            
+
             # 최적화 수행
             random_search.fit(self.X_train, self.y_train)
-            
+
             # 최적의 파라미터 및 모델
             best_params = random_search.best_params_
             model = random_search.best_estimator_
-            
+
             print(f"최적 파라미터: {best_params}")
             print(f"최적 점수: {random_search.best_score_:.4f}")
         else:
             # 기본 모델 학습
             model.fit(
-                self.X_train, 
+                self.X_train,
                 self.y_train,
                 eval_set=[(self.X_train, self.y_train), (self.X_test, self.y_test)],
                 verbose=100
             )
-        
+
         self.model = model
-        
+
         # 테스트 정확도 계산
         if self.prediction_type == 'classification':
             y_pred = self.model.predict(self.X_test)
@@ -626,13 +635,13 @@ class StockPredictionModel:
         else:  # regression
             y_pred = self.model.predict(self.X_test)
             self.test_accuracy = r2_score(self.y_test, y_pred)
-        
+
         return model
-    
+
     def evaluate_model(self):
         """
         모델 성능 평가
-        
+
         Returns:
         --------
         dict
@@ -640,17 +649,17 @@ class StockPredictionModel:
         """
         if self.model is None:
             raise ValueError("먼저 train_model() 메서드를 호출하세요.")
-            
+
         print("모델 평가 중...")
-        
+
         # 예측
         if self.prediction_type == 'classification':
             y_pred = self.model.predict(self.X_test)
-            
+
             # AUC 계산 시 예외 처리 추가
             try:
                 y_pred_proba = self.model.predict_proba(self.X_test)[:, 1]
-                
+
                 # 클래스가 하나만 있는지 확인
                 if len(np.unique(self.y_test)) < 2:
                     print("경고: 테스트 데이터에 클래스가 하나만 있어 AUC를 계산할 수 없습니다.")
@@ -660,7 +669,7 @@ class StockPredictionModel:
             except Exception as e:
                 print(f"AUC 계산 오류: {e}")
                 auc = 0.5  # 기본값으로 0.5 설정
-            
+
             # 다른 평가 지표 계산 시에도 예외 처리 추가
             try:
                 accuracy = accuracy_score(self.y_test, y_pred)
@@ -670,21 +679,21 @@ class StockPredictionModel:
             except Exception as e:
                 print(f"평가 지표 계산 오류: {e}")
                 accuracy = precision = recall = f1 = 0
-            
+
             # 평가 결과 출력
             print(f"정확도: {accuracy:.4f}")
             print(f"정밀도: {precision:.4f}")
             print(f"재현율: {recall:.4f}")
             print(f"F1 점수: {f1:.4f}")
             print(f"AUC: {auc:.4f}")
-            
+
             # 분류 리포트
             try:
                 print("\n분류 리포트:")
                 print(classification_report(self.y_test, y_pred))
             except Exception as e:
                 print(f"분류 리포트 생성 오류: {e}")
-            
+
             # 혼동 행렬 - 그래프 생성하지 않음
             try:
                 cm = confusion_matrix(self.y_test, y_pred)
@@ -693,10 +702,10 @@ class StockPredictionModel:
                 print(cm)
             except Exception as e:
                 print(f"혼동 행렬 계산 오류: {e}")
-            
+
             # 테스트 정확도 저장
             self.test_accuracy = accuracy
-            
+
             return {
                 'accuracy': accuracy,
                 'precision': precision,
@@ -706,7 +715,7 @@ class StockPredictionModel:
             }
         else:  # regression
             y_pred = self.model.predict(self.X_test)
-            
+
             # 평가 지표
             try:
                 mse = mean_squared_error(self.y_test, y_pred)
@@ -716,25 +725,25 @@ class StockPredictionModel:
                 print(f"평가 지표 계산 오류: {e}")
                 mse = rmse = 0
                 r2 = 0
-            
+
             # 평가 결과 출력
             print(f"MSE: {mse:.4f}")
             print(f"RMSE: {rmse:.4f}")
             print(f"R2 점수: {r2:.4f}")
-            
+
             # 테스트 정확도 (R2) 저장
             self.test_accuracy = r2
-            
+
             return {
                 'mse': mse,
                 'rmse': rmse,
                 'r2': r2
             }
-    
+
     def plot_feature_importance(self, top_n=20):
         """
         특성 중요도 시각화
-        
+
         Parameters:
         -----------
         top_n : int
@@ -742,19 +751,19 @@ class StockPredictionModel:
         """
         if self.model is None:
             raise ValueError("먼저 train_model() 메서드를 호출하세요.")
-            
+
         # 특성 중요도 추출
         importance = self.model.feature_importances_
         indices = np.argsort(importance)[::-1]
-        
+
         # 상위 N개 특성 선택
         if top_n > len(self.feature_names):
             top_n = len(self.feature_names)
-            
+
         top_indices = indices[:top_n]
         top_features = [self.feature_names[i] for i in top_indices]
         top_importance = importance[top_indices]
-        
+
         # 시각화
         plt.figure(figsize=(12, 8))
         plt.barh(range(top_n), top_importance, align='center')
@@ -764,91 +773,91 @@ class StockPredictionModel:
         plt.gca().invert_yaxis()  # 중요도 내림차순 정렬
         plt.tight_layout()
         # plt.show()
-        
+
         # 중요도 정보 반환
         return dict(zip(top_features, top_importance))
-    
+
     def enhanced_prediction(self, days=1):
         """향상된 신뢰도와 정확도를 제공하는 예측 메서드"""
         # 기본 예측 수행
         base_prediction = self.predict_future(days)
-        
+
         if self.prediction_type != 'classification':
             return base_prediction  # 회귀 모델은 기본 예측만 수행
-        
+
         # 최신 데이터
         latest_data = self.data_with_features.iloc[-1]
         features = latest_data[self.feature_names].values.reshape(1, -1)
         features_scaled = self.scaler.transform(features)
-        
+
         # 1. 다중 모델 예측 (여러 기간의 예측 결합)
         multi_period_preds = []
         # 현재 모델의 예측
-        multi_period_preds.append((self.prediction_period, base_prediction['Prediction'].iloc[0], 
+        multi_period_preds.append((self.prediction_period, base_prediction['Prediction'].iloc[0],
                                 base_prediction['Confidence'].iloc[0]))
-        
+
         # 2. 다중 기간 신호의 일관성 확인
         consistent_signals = True
         main_signal = base_prediction['Prediction'].iloc[0]
-        
+
         # 3. 시장 상태 확인
         recent_data = self.data_with_features.tail(20)
         market_trend = recent_data['Close'].pct_change().mean() > 0
         market_vol = recent_data['Return'].std()
-        
+
         # 일관성 및 시장 상태에 따른 확신도 조정
         base_confidence = base_prediction['Confidence'].iloc[0]
         adjusted_confidence = base_confidence
-        
+
         # 시장 추세와 예측 방향이 일치하면 확신도 상승
         if (market_trend and main_signal == 1) or (not market_trend and main_signal == 0):
             adjusted_confidence = min(0.99, base_confidence * 1.15)  # 15% 상승
-        
+
         # 변동성이 높으면 확신도 감소
         if market_vol > 0.02:  # 2% 이상 변동성
             adjusted_confidence = adjusted_confidence * 0.9  # 10% 감소
-        
+
         # 기술적 지표의 추가 확인 (RSI, MACD, BB)
         tech_confirmation = 0
-        
+
         # RSI 확인 (과매수/과매도 상태인지)
         if 'RSI' in recent_data.columns:
             rsi = recent_data['RSI'].iloc[-1]
             if (rsi > 70 and main_signal == 0) or (rsi < 30 and main_signal == 1):
                 tech_confirmation += 1  # 기술적 지표가 예측 방향 확인
-        
+
         # MACD 확인
         if 'MACD' in recent_data.columns and 'MACD_Signal' in recent_data.columns:
             macd_signal = recent_data['MACD'].iloc[-1] > recent_data['MACD_Signal'].iloc[-1]
             if (macd_signal and main_signal == 1) or (not macd_signal and main_signal == 0):
                 tech_confirmation += 1
-        
+
         # 기술적 지표 확인에 따른 확신도 조정
         if tech_confirmation >= 2:
             adjusted_confidence = min(0.99, adjusted_confidence * 1.1)  # 10% 상승
-        
+
         # 최종 예측 결과 업데이트
         enhanced_pred = base_prediction.copy()
         enhanced_pred['Confidence'].iloc[0] = adjusted_confidence
-        
+
         # 매우 강한 신호일 경우 추가 표시
         strong_signal = adjusted_confidence > 0.75
         if strong_signal:
             print(f"강한 신호 감지: {adjusted_confidence:.2f} 확신도")
-        
+
         return enhanced_pred
 
     def backtest(self, initial_capital=10000, transaction_cost=0.001):
         """
         백테스트 수행
-        
+
         Parameters:
         -----------
         initial_capital : float
             초기 자본
         transaction_cost : float
             거래 비용 (매매 금액의 비율)
-            
+
         Returns:
         --------
         dict
@@ -856,12 +865,12 @@ class StockPredictionModel:
         """
         if self.model is None:
             raise ValueError("먼저 train_model() 메서드를 호출하세요.")
-            
+
         print("백테스트 수행 중...")
-        
+
         # 테스트 데이터 가져오기
         test_data = self.data_with_features.iloc[-len(self.X_test):].reset_index(drop=True)
-        
+
         # 예측
         if self.prediction_type == 'classification':
             test_data['PredictionProba'] = self.model.predict_proba(self.X_test)[:, 1]
@@ -871,46 +880,46 @@ class StockPredictionModel:
             test_data['Prediction'] = self.model.predict(self.X_test)
             # 다음 예측 가격이 현재 가격보다 높으면 매수 신호
             test_data['Signal'] = (test_data['Prediction'] > test_data['Close']).astype(int)
-        
+
         # 거래 시뮬레이션
         test_data['Position'] = test_data['Signal'].shift(1).fillna(0).astype(int)
         test_data['Returns'] = test_data['Close'] / test_data['Close'].shift(1) - 1
         test_data['Strategy_Returns'] = test_data['Position'] * test_data['Returns']
-        
+
         # 거래 비용 고려
         test_data['Trade'] = test_data['Position'].diff().abs()
         test_data['Cost'] = test_data['Trade'] * transaction_cost
         test_data['Strategy_Returns_Net'] = test_data['Strategy_Returns'] - test_data['Cost']
-        
+
         # 누적 수익 계산
         test_data['Cumulative_Returns'] = (1 + test_data['Returns']).cumprod()
         test_data['Strategy_Cumulative_Returns'] = (1 + test_data['Strategy_Returns_Net']).cumprod()
-        
+
         # 백테스트 성과 지표
         total_return = test_data['Strategy_Cumulative_Returns'].iloc[-1] - 1
         buy_hold_return = test_data['Cumulative_Returns'].iloc[-1] - 1
-        
+
         # 연간 수익률
         days = (test_data['Date'].iloc[-1] - test_data['Date'].iloc[0]).days
         annual_return = (1 + total_return) ** (365 / max(days, 1)) - 1
-        
+
         # 샤프 비율
         daily_returns = test_data['Strategy_Returns_Net']
         sharpe_ratio = np.sqrt(252) * daily_returns.mean() / (daily_returns.std() + 1e-10)
-        
+
         # 최대 손실
         max_drawdown = (test_data['Strategy_Cumulative_Returns'] / test_data['Strategy_Cumulative_Returns'].cummax() - 1).min()
-        
+
         # 승률
         win_rate = (test_data[test_data['Position'] == 1]['Returns'] > 0).mean()
-        
+
         # 일평균 가격 변동폭 계산
         try:
             avg_daily_range = ((test_data['High'] - test_data['Low']) / test_data['Close']).mean()
         except Exception as e:
             print(f"일평균 변동폭 계산 오류: {e}")
             avg_daily_range = 0.03  # 기본값으로 3% 설정
-        
+
         # 결과 출력
         print(f"총 수익률: {total_return:.4f} ({total_return * 100:.2f}%)")
         print(f"매수 후 보유 수익률: {buy_hold_return:.4f} ({buy_hold_return * 100:.2f}%)")
@@ -919,7 +928,7 @@ class StockPredictionModel:
         print(f"최대 손실: {max_drawdown:.4f} ({max_drawdown * 100:.2f}%)")
         print(f"승률: {win_rate:.4f} ({win_rate * 100:.2f}%)")
         print(f"총 거래 횟수: {test_data['Trade'].sum() / 2:.0f}")
-        
+
         # 백테스트 결과 저장 (test_data 제외하여 메모리 사용량 감소)
         self.backtest_results = {
             # 'test_data': test_data,  # 메모리 사용량 줄이기 위해 제거
@@ -932,7 +941,7 @@ class StockPredictionModel:
             'trade_count': test_data['Trade'].sum() / 2,
             'avg_daily_range': avg_daily_range
         }
-        
+
         # 시각화는 사용하지 않음
         # 대신 간단한 요약만 콘솔에 출력
         print("\n거래 요약:")
@@ -940,18 +949,18 @@ class StockPredictionModel:
         sell_count = (test_data['Trade'] == -1).sum()
         print(f"총 매수 횟수: {buy_count}")
         print(f"총 매도 횟수: {sell_count}")
-        
+
         return self.backtest_results
 
 def get_financial_info(stock_code):
         """
         네이버 금융에서 재무정보 스크래핑
-        
+
         Parameters:
         -----------
         stock_code : str
             종목 코드
-            
+
         Returns:
         --------
         dict
@@ -960,46 +969,46 @@ def get_financial_info(stock_code):
         import requests
         from bs4 import BeautifulSoup
         import pandas as pd
-        
+
         try:
             # 네이버 금융 종목 페이지 URL
             url = f"https://finance.naver.com/item/main.naver?code={stock_code}"
-            
+
             # 페이지 요청
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
             response = requests.get(url, headers=headers)
             response.encoding = 'euc-kr'
-            
+
             # BeautifulSoup로 HTML 파싱
             soup = BeautifulSoup(response.text, 'html.parser')
-            
+
             # 재무정보 추출
             financial_info = {}
-            
+
             # 투자지표 테이블
             finance_table = soup.select('#tab_con1 > div:nth-child(3) > table > tbody > tr')
-            
+
             # PER, PBR, ROE 등 기본 투자지표 추출
             for row in finance_table:
                 th_tags = row.find_all('th')
                 td_tags = row.find_all('td', class_='num')
-                
+
                 if len(th_tags) > 0 and len(td_tags) > 0:
                     indicator_name = th_tags[0].text.strip()
                     # 가장 최근 분기 데이터 사용
                     indicator_value = td_tags[0].text.strip().replace('%', '').replace(',', '')
-                    
+
                     try:
                         indicator_value = float(indicator_value)
                         financial_info[indicator_name] = indicator_value
                     except:
                         pass
-            
+
             # 더 많은 정보가 필요하면 여기에 추가 스크래핑 코드 작성
             # 예: 매출액, 영업이익, 순이익 등
-            
+
             return financial_info
-        
+
         except Exception as e:
             print(f"재무정보 스크래핑 오류: {e}")
             return {}
@@ -1007,7 +1016,7 @@ def get_financial_info(stock_code):
 def create_ensemble_model(stock_code, period='5y', prediction_period=5):
         """
         재무정보와 기술적 지표를 결합한 앙상블 모델 생성
-        
+
         Parameters:
         -----------
         stock_code : str
@@ -1016,7 +1025,7 @@ def create_ensemble_model(stock_code, period='5y', prediction_period=5):
             분석 기간
         prediction_period : int
             예측 기간
-            
+
         Returns:
         --------
         dict
@@ -1028,7 +1037,7 @@ def create_ensemble_model(stock_code, period='5y', prediction_period=5):
         stock = yf.Ticker(ticker)
         df = stock.history(period=period)
         df.reset_index(inplace=True)
-        
+
         # 1. 기술적 지표 모델
         tech_model = StockPredictionModel(prediction_period=prediction_period)
         tech_model.load_data(df=df)
@@ -1037,7 +1046,7 @@ def create_ensemble_model(stock_code, period='5y', prediction_period=5):
         tech_model.train_model(optimize=True, n_iter=10)
         tech_model.select_important_features(threshold=0.01)
         tech_prediction = tech_model.predict_future()
-        
+
         # 2. 재무 정보 활용 모델
         financial_model = StockPredictionModel(prediction_period=prediction_period)
         financial_model.load_data(df=df)
@@ -1046,20 +1055,20 @@ def create_ensemble_model(stock_code, period='5y', prediction_period=5):
         financial_model.train_model(optimize=True, n_iter=10)
         financial_model.select_important_features(threshold=0.01)
         financial_prediction = financial_model.predict_future()
-        
+
         # 3. 앙상블 (가중 평균)
         tech_pred = tech_prediction['Prediction'].iloc[0]
         tech_conf = tech_prediction['Confidence'].iloc[0]
         fin_pred = financial_prediction['Prediction'].iloc[0]
         fin_conf = financial_prediction['Confidence'].iloc[0]
-        
+
         # 기술적 지표와 재무 정보의 가중치 설정 (60:40)
         ensemble_pred = tech_pred * 0.6 + fin_pred * 0.4
         ensemble_conf = tech_conf * 0.6 + fin_conf * 0.4
-        
+
         final_prediction = 1 if ensemble_pred > 0.5 else 0
         final_confidence = ensemble_conf if final_prediction == 1 else 1 - ensemble_conf
-        
+
         return {
             'prediction': final_prediction,
             'confidence': final_confidence,
@@ -1077,7 +1086,7 @@ def create_enhanced_ensemble_model(stock_code, period='5y', prediction_period=5)
     stock = yf.Ticker(ticker)
     df = stock.history(period=period)
     df.reset_index(inplace=True)
-    
+
     # 다양한 예측 기간의 모델 결과 수집
     period_results = []
     for pred_period in [1, 3, 5, 10]:
@@ -1089,44 +1098,44 @@ def create_enhanced_ensemble_model(stock_code, period='5y', prediction_period=5)
         # 빠른 학습 (주기간만 최적화)
         optimize = (pred_period == prediction_period)
         model.train_model(optimize=optimize, n_iter=10 if optimize else 5)
-        
+
         if optimize:
             model.select_important_features(threshold=0.01)
-        
+
         # 향상된 예측 수행
         if hasattr(model, 'enhanced_prediction'):
             prediction = model.enhanced_prediction()
         else:
             prediction = model.predict_future()
-        
+
         # 결과 저장
         pred = prediction['Prediction'].iloc[0]
         conf = prediction['Confidence'].iloc[0]
-        
+
         # 예측 기간에 따른 가중치 설정 (주 기간에 더 높은 가중치)
         weight = 2.0 if pred_period == prediction_period else 1.0
-        
+
         period_results.append((pred_period, pred, conf, weight))
-    
+
     # 가중 투표로 앙상블
     weighted_sum = sum(p * c * w for _, p, c, w in period_results)
     total_weight = sum(c * w for _, _, c, w in period_results)
-    
+
     # 예측 및 신뢰도 계산
     ensemble_pred = weighted_sum / total_weight if total_weight > 0 else 0.5
     final_prediction = 1 if ensemble_pred > 0.5 else 0
-    
+
     # 신뢰도 계산
     # 각 모델의 확신도와 예측이 전체 결과와 일치할수록 높은 신뢰도
     agreement_factor = sum(1 for _, p, _, _ in period_results if (p > 0.5) == (final_prediction == 1))
     agreement_ratio = agreement_factor / len(period_results)
-    
+
     # 주 모델의 확신도 찾기
     main_confidence = next((c for p, _, c, _ in period_results if p == prediction_period), 0.6)
-    
+
     # 최종 확신도 계산 (주 모델 확신도 * 일치도)
     final_confidence = main_confidence * (0.7 + 0.3 * agreement_ratio)
-    
+
     return {
         'prediction': final_prediction,
         'confidence': final_confidence,
@@ -1137,39 +1146,39 @@ def create_enhanced_ensemble_model(stock_code, period='5y', prediction_period=5)
 def ensemble_predictions(stock_code, periods=[1, 3, 5, 10]):
     """여러 예측 기간의 모델을 앙상블하여 예측"""
     results = []
-    
+
     # 데이터 다운로드
     import yfinance as yf
     ticker = f"{stock_code}.KS"
     stock = yf.Ticker(ticker)
     df = stock.history(period="5y")  # 5년 데이터로 확장
     df.reset_index(inplace=True)
-    
+
     for period in periods:
         # 모델 생성
         model = StockPredictionModel(prediction_period=period)
-        
+
         # 데이터 준비 및 모델 학습
         model.load_data(df=df)
         model.create_features(advanced=True)
         model.prepare_data(test_size=0.2)
         model.train_model(optimize=True, n_iter=10)  # 최적화 활성화
-        
+
         # 특성 선택 적용
         model.select_important_features(threshold=0.01)
-        
+
         # 미래 예측
         prediction = model.predict_future()
         results.append((period, prediction['Prediction'].iloc[0], prediction['Confidence'].iloc[0]))
-    
+
     # 다수결 또는 가중 투표로 최종 결정
     # 예시: 확신도로 가중 평균
     weighted_sum = sum(conf * pred for _, pred, conf in results)
     total_conf = sum(conf for _, _, conf in results)
-    
+
     final_prediction = 1 if weighted_sum/total_conf > 0.5 else 0
     confidence = weighted_sum/total_conf if final_prediction == 1 else 1 - weighted_sum/total_conf
-    
+
     return {'prediction': final_prediction, 'confidence': confidence, 'models': results}
 
 class StockAnalyzer:
@@ -1177,7 +1186,7 @@ class StockAnalyzer:
     다중 주식 분석 및 스크리닝을 위한 클래스
     StockPredictionModel을 사용하여 다수의 주식을 분석하고 결과를 비교합니다.
     """
-    
+
     def __init__(self):
         """
         주식 분석기 초기화
@@ -1192,8 +1201,8 @@ class StockAnalyzer:
             return code, self.analyze_stock(code, company, period='5y', prediction_period=5)  # 개선: 5년 데이터 사용
         except Exception as e:
             print(f"{code} 분석 실패: {str(e)}")
-            return code, None    
-        
+            return code, None
+
     def get_krx_stock_codes(self):
         """
         한국 거래소(KRX) 종목 코드 가져오기
@@ -1201,25 +1210,25 @@ class StockAnalyzer:
         try:
             # 여러 방법으로 시도
             parsers = ['html5lib', 'lxml', 'bs4']
-            
+
             for parser in parsers:
                 try:
                     # macOS에서 SSL 인증서 검증 문제 해결
                     import ssl
                     ssl._create_default_https_context = ssl._create_unverified_context
-                    
+
                     # KRX 종목 코드 가져오기
-                    krx = pd.read_html('http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13', 
+                    krx = pd.read_html('http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13',
                                     header=0, encoding='euc-kr', flavor=parser)[0]
                     krx = krx[['종목코드', '회사명']]
                     krx['종목코드'] = krx['종목코드'].apply(lambda x: f'{x:06d}')
                     krx = krx.rename(columns={'종목코드': 'code', '회사명': 'company'})
-                    
+
                     print(f"KRX 종목 수: {len(krx)} (parser: {parser})")
                     return krx
                 except Exception as e:
                     print(f"{parser} 파서 사용 실패: {e}")
-            
+
             # 모든 파서가 실패하면 예시 데이터 반환
             raise Exception("모든 파서가 실패했습니다.")
         except Exception as e:
@@ -1229,11 +1238,11 @@ class StockAnalyzer:
                 'code': ['005930', '000660', '035720', '051910', '035420'],
                 'company': ['삼성전자', 'SK하이닉스', '카카오', 'LG화학', 'NAVER']
             })
-    
+
     def download_stock_data(self, stock_code, period='5y', proxy=None):  # 개선: 기본값 5y로 변경
         """
         Yahoo Finance에서 주식 데이터 다운로드
-        
+
         Parameters:
         -----------
         stock_code : str
@@ -1242,7 +1251,7 @@ class StockAnalyzer:
             다운로드 기간 ('1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', '10y', 'max')
         proxy : str, optional
             프록시 서버 URL
-            
+
         Returns:
         --------
         DataFrame
@@ -1251,28 +1260,28 @@ class StockAnalyzer:
         try:
             # 한국 주식은 종목코드.KS 형식으로 요청
             ticker = f"{stock_code}.KS"
-            
+
             # Yahoo Finance에서 데이터 다운로드
             stock = yf.Ticker(ticker)
             df = stock.history(period=period)
-            
+
             # 인덱스를 Date 열로 변환
             df.reset_index(inplace=True)
-            df.rename(columns={'Date': 'Date', 'Open': 'Open', 'High': 'High', 
+            df.rename(columns={'Date': 'Date', 'Open': 'Open', 'High': 'High',
                              'Low': 'Low', 'Close': 'Close', 'Volume': 'Volume'}, inplace=True)
-            
+
             # 필요한 열만 선택
             df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']]
-            
+
             return df
         except Exception as e:
             print(f"{stock_code} 데이터 다운로드 실패: {e}")
             return None
-        
+
     def analyze_all_stocks_parallel(self, stock_codes=None, period='5y', max_stocks=None, prediction_period=5, workers=4):  # 개선: 5y로 변경
         """
         다수의 주식을 병렬로 분석
-        
+
         Parameters:
         -----------
         stock_codes : DataFrame or list, optional
@@ -1285,7 +1294,7 @@ class StockAnalyzer:
             예측 기간 (일)
         workers : int
             병렬 처리에 사용할 작업자 수
-            
+
         Returns:
         --------
         dict
@@ -1293,34 +1302,34 @@ class StockAnalyzer:
         """
         # ThreadPoolExecutor를 사용 (matplotlib 문제 방지)
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        
+
         # matplotlib 백엔드를 'Agg'로 설정하여 UI 창이 열리지 않도록 함
         import matplotlib
-        matplotlib.use('Agg')    
-        
+        matplotlib.use('Agg')
+
         # XGBoost 경고 메시지 억제
         import warnings
         warnings.filterwarnings("ignore", message="Dataset is empty, or contains only positive or negative samples")
-        
+
         if stock_codes is None:
             # KRX 종목 코드 가져오기
             stock_codes = self.get_krx_stock_codes()
-        
+
         # 데이터프레임인 경우 처리
         if isinstance(stock_codes, pd.DataFrame):
             codes_list = list(zip(stock_codes['code'], stock_codes['company']))
         else:
             codes_list = [(code, None) for code in stock_codes]
-        
+
         # 최대 종목 수 제한
         if max_stocks is not None:
             codes_list = codes_list[:max_stocks]
-        
+
         print(f"총 {len(codes_list)}개 종목 병렬 분석 시작 (작업자: {workers}명)...")
-        
+
         # 분석 결과 저장
         results = {}
-        
+
         # 각 종목 분석을 위한 함수
         def _analyze_stock_wrapper(args):
             code, company = args
@@ -1331,7 +1340,7 @@ class StockAnalyzer:
             except Exception as e:
                 print(f"{code} 분석 실패: {str(e)}")
                 return code, None
-        
+
         # ThreadPoolExecutor로 병렬 처리
         with ThreadPoolExecutor(max_workers=workers) as executor:
             # 작업 제출
@@ -1339,7 +1348,7 @@ class StockAnalyzer:
             for code_company in codes_list:
                 future = executor.submit(_analyze_stock_wrapper, code_company)
                 futures.append(future)
-            
+
             # 진행 상황 표시
             for future in tqdm(as_completed(futures), total=len(futures), desc="주식 병렬 분석 중"):
                 try:
@@ -1349,16 +1358,16 @@ class StockAnalyzer:
                 except Exception as e:
                     print(f"분석 중 오류 발생: {e}")
                     continue
-        
+
         print(f"\n분석 완료: {len(results)}개 종목 (성공: {len(results)}, 실패: {len(codes_list) - len(results)})")
-        
+
         # 결과 저장
         self.analysis_results = results
-        
+
         return results
-    
+
     def analyze_stock(self, stock_code, company_name=None, period='5y', prediction_period=5, use_financials=True):
-        """        
+        """
         Parameters:
         -----------
         stock_code : str
@@ -1369,7 +1378,7 @@ class StockAnalyzer:
             분석 기간
         prediction_period : int
             예측 기간 (일)
-            
+
         Returns:
         --------
         dict
@@ -1379,14 +1388,14 @@ class StockAnalyzer:
             print(f"\n{'='*50}")
             print(f"분석 중: {company_name if company_name else stock_code}")
             print(f"{'='*50}")
-            
+
             # 데이터 다운로드
             df = self.download_stock_data(stock_code, period=period)
-            
+
             if df is None or len(df) < 100:
                 print(f"데이터가 충분하지 않습니다. 건너뜁니다.")
                 return None
-            
+
             # 거래량 체크
             try:
                 avg_volume = df['Volume'].mean()
@@ -1395,39 +1404,39 @@ class StockAnalyzer:
                     return None
             except Exception as e:
                 print(f"거래량 확인 오류: {e}")
-            
+
             # 예측 모델 초기화
             model = StockPredictionModel(prediction_type='classification', prediction_period=prediction_period)
-            
+
             # 데이터 로드
             model.load_data(df=df)
-            
+
             # 특성 엔지니어링
             model.create_features(advanced=True, stock_code=stock_code)
-            
+
             # 데이터 준비
             model.prepare_data(test_size=0.2)
 
             # 1단계: 빠른 기본 모델 학습 (최적화 비활성화)
             print("1단계: 초기 모델 학습 중...")
             model.train_model(optimize=False)
-            
+
             # 2단계: 특성 선택
             print("2단계: 중요 특성 선택 중...")
             selected_features = model.select_important_features(threshold=0.01)
             print(f"선택된 특성 수: {len(selected_features)}")
-            
+
             # 3단계: 선택된 특성으로 최적화된 모델 재학습
             print("3단계: 최적화된 모델 재학습 중...")
             model.train_model(optimize=True)  # 2번째 학습에서는 최적화 활성화
-            
+
             # 모델 평가
             try:
                 metrics = model.evaluate_model()
             except Exception as e:
                 print(f"모델 평가 오류: {e}")
                 metrics = {'accuracy': 0.5, 'precision': 0, 'recall': 0, 'f1': 0, 'auc': 0.5}
-            
+
             # 백테스트
             try:
                 backtest_results = model.backtest()
@@ -1435,16 +1444,16 @@ class StockAnalyzer:
                 print(f"백테스트 오류: {e}")
                 # 기본 백테스트 결과 생성
                 backtest_results = {
-                    'total_return': 0, 
-                    'buy_hold_return': 0, 
+                    'total_return': 0,
+                    'buy_hold_return': 0,
                     'annual_return': 0,
-                    'sharpe_ratio': 0, 
-                    'max_drawdown': 0, 
-                    'win_rate': 0, 
+                    'sharpe_ratio': 0,
+                    'max_drawdown': 0,
+                    'win_rate': 0,
                     'trade_count': 0,
                     'avg_daily_range': 0.03
                 }
-            
+
             if use_financials:
                 # 재무정보 통합 앙상블 모델 사용
                 ensemble_result = create_enhanced_ensemble_model(stock_code, period, prediction_period)
@@ -1454,7 +1463,7 @@ class StockAnalyzer:
                 # 미래 예측
                 try:
                     future_prediction = model.predict_future(days=1)
-                    
+
                     if model.prediction_type == 'classification':
                         prediction_signal = "매수" if future_prediction['Prediction'].iloc[0] == 1 else "매도"
                         prediction_confidence = future_prediction['Confidence'].iloc[0]
@@ -1467,7 +1476,7 @@ class StockAnalyzer:
                     prediction_signal = "관망"
                     prediction_confidence = 0
                     expected_return = 0
-            
+
             # 결과 저장
             result = {
                 'stock_code': stock_code,
@@ -1482,26 +1491,26 @@ class StockAnalyzer:
                 'prediction_signal': prediction_signal,
                 'prediction_confidence': prediction_confidence
             }
-            
+
             # 결과 요약 출력
             print(f"\n결과 요약: {company_name if company_name else stock_code}")
             print(f"모델 정확도: {model.test_accuracy:.4f}")
             print(f"백테스트 수익률: {backtest_results['total_return']:.4f}")
             print(f"매수 후 보유 수익률: {backtest_results['buy_hold_return']:.4f}")
             print(f"예측 신호: {prediction_signal}")
-            
+
             return result
-            
+
         except Exception as e:
             print(f"분석 실패: {str(e)}")
             import traceback
             traceback.print_exc()
             return None
-            
+
     def analyze_all_stocks(self, stock_codes=None, period='5y', max_stocks=None, prediction_period=5):  # 개선: 5y로 변경
         """
         다수의 주식 분석 및 스크리닝
-        
+
         Parameters:
         -----------
         stock_codes : DataFrame or list, optional
@@ -1512,7 +1521,7 @@ class StockAnalyzer:
             최대 분석 종목 수
         prediction_period : int
             예측 기간 (일)
-            
+
         Returns:
         --------
         dict
@@ -1521,39 +1530,39 @@ class StockAnalyzer:
         if stock_codes is None:
             # KRX 종목 코드 가져오기
             stock_codes = self.get_krx_stock_codes()
-        
+
         # 데이터프레임인 경우 처리
         if isinstance(stock_codes, pd.DataFrame):
             codes_list = list(zip(stock_codes['code'], stock_codes['company']))
         else:
             codes_list = [(code, None) for code in stock_codes]
-        
+
         # 최대 종목 수 제한
         if max_stocks is not None:
             codes_list = codes_list[:max_stocks]
-        
+
         print(f"총 {len(codes_list)}개 종목 분석 시작...")
-        
+
         # 분석 결과 저장
         results = {}
-        
+
         # 프로그레스바로 진행 상황 표시
         for i, (code, company) in enumerate(tqdm(codes_list, desc="주식 분석 중")):
             result = self.analyze_stock(code, company, period, prediction_period)
             if result is not None:
                 results[code] = result
-        
+
         print(f"\n분석 완료: {len(results)}개 종목 (성공: {len(results)}, 실패: {len(codes_list) - len(results)})")
-        
+
         # 결과 저장
         self.analysis_results = results
-        
+
         return results
-    
+
     def get_top_stocks(self, criteria='backtest_return', top_n=10, ascending=False):
         """
         특정 기준으로 상위 종목 선택
-        
+
         Parameters:
         -----------
         criteria : str
@@ -1562,7 +1571,7 @@ class StockAnalyzer:
             반환할 상위 종목 수
         ascending : bool
             오름차순 정렬 여부
-            
+
         Returns:
         --------
         DataFrame
@@ -1570,10 +1579,10 @@ class StockAnalyzer:
         """
         if not self.analysis_results:
             raise ValueError("먼저 analyze_all_stocks() 메서드를 호출하세요.")
-        
+
         # 결과를 데이터프레임으로 변환
         results_data = []
-        
+
         for code, result in self.analysis_results.items():
             data = {
                 'code': code,
@@ -1589,10 +1598,10 @@ class StockAnalyzer:
                 'prediction_confidence': result.get('prediction_confidence', 0)
             }
             results_data.append(data)
-        
+
         # 데이터프레임 생성
         df_results = pd.DataFrame(results_data)
-        
+
         # 기준에 따라 정렬
         if criteria == 'backtest_return':
             sort_col = 'backtest_return'
@@ -1604,17 +1613,17 @@ class StockAnalyzer:
             sort_col = 'win_rate'
         else:
             sort_col = criteria
-        
+
         # 정렬 및 상위 종목 선택
         df_sorted = df_results.sort_values(sort_col, ascending=ascending)
         top_stocks = df_sorted.head(top_n)
-        
+
         return top_stocks
-    
+
     def plot_top_stocks(self, criteria='backtest_return', top_n=10, ascending=False):
         """
         상위 종목 성과 시각화
-        
+
         Parameters:
         -----------
         criteria : str
@@ -1626,47 +1635,47 @@ class StockAnalyzer:
         """
         # 상위 종목 가져오기
         top_stocks = self.get_top_stocks(criteria, top_n, ascending)
-        
+
         # 백테스트 수익률 시각화
         plt.figure(figsize=(12, 6))
         bars = plt.bar(top_stocks['company'], top_stocks['backtest_return'] * 100)
-        
+
         # 매수 후 보유 수익률 추가
         plt.bar(top_stocks['company'], top_stocks['buy_hold_return'] * 100, alpha=0.5, color='gray')
-        
+
         # 그래프 꾸미기
         plt.title(f'상위 {top_n}개 종목 백테스트 수익률')
         plt.xlabel('종목명')
         plt.ylabel('수익률 (%)')
         plt.xticks(rotation=45, ha='right')
         plt.grid(axis='y', alpha=0.3)
-        
+
         # 수익률 표시
         for bar in bars:
             height = bar.get_height()
             plt.text(bar.get_x() + bar.get_width()/2., height + 1,
                     f'{height:.1f}%', ha='center', va='bottom')
-        
+
         plt.tight_layout()
         # plt.show()
-        
+
         # 정확도 vs 샤프 비율 산점도
         plt.figure(figsize=(10, 6))
-        scatter = plt.scatter(top_stocks['accuracy'], top_stocks['sharpe_ratio'], 
+        scatter = plt.scatter(top_stocks['accuracy'], top_stocks['sharpe_ratio'],
                             s=top_stocks['backtest_return'] * 1000, alpha=0.6,
                             c=top_stocks['win_rate'], cmap='viridis')
-        
+
         # 종목명 표시
         for i, txt in enumerate(top_stocks['company']):
             plt.annotate(txt, (top_stocks['accuracy'].iloc[i], top_stocks['sharpe_ratio'].iloc[i]),
                         xytext=(5, 5), textcoords='offset points')
-        
+
         plt.title('정확도 vs 샤프 비율')
         plt.xlabel('정확도')
         plt.ylabel('샤프 비율')
         plt.grid(True, alpha=0.3)
         plt.colorbar(scatter, label='승률')
-        
+
         plt.tight_layout()
         # plt.show()
 
@@ -1675,41 +1684,41 @@ class StockAnalyzer:
         """최적화된 결과만 CSV에 저장"""
         # 1. 필수 열만 선택
         essential_cols = [
-            '종목코드', '종목명', '현재가', 
+            '종목코드', '종목명', '현재가',
             '예측방향', '예측확신도', '거래결정',
             '목표가', '손절가',  # 목표가/손절가는 중요한 매매 지표
             '정확도', '승률', '백테스트수익률'
         ]
-        
+
         optimized_df = all_results_df[essential_cols].copy()
-        
+
         # 2. 거래 가능한 종목만 필터링 (관망 제외)
         action_df = optimized_df[optimized_df['거래결정'] != '관망']
-        
-        # 3. 확신도가 높은 종목만 선택 
+
+        # 3. 확신도가 높은 종목만 선택
         high_confidence = action_df[
-            (action_df['예측확신도'] >= 0.55) & 
+            (action_df['예측확신도'] >= 0.55) &
             (action_df['정확도'] >= 0.55)
         ]
-        
+
         # 4. 정렬
         high_confidence = high_confidence.sort_values('예측확신도', ascending=False)
-        
+
         # 저장
         high_confidence.to_csv(filename, index=False, encoding='utf-8-sig')
         print(f"최적화된 결과 {len(high_confidence)}개가 {filename}에 저장되었습니다.")
-        
+
         return high_confidence
-    
+
     def generate_report(self, top_n=20):
         """
         분석 결과 보고서 생성
-        
+
         Parameters:
         -----------
         top_n : int
             보고서에 포함할 상위 종목 수
-            
+
         Returns:
         --------
         str
@@ -1717,41 +1726,41 @@ class StockAnalyzer:
         """
         if not self.analysis_results:
             raise ValueError("먼저 analyze_all_stocks() 메서드를 호출하세요.")
-        
+
         # 상위 종목 가져오기
         top_backtest = self.get_top_stocks('backtest_return', top_n)
         top_accuracy = self.get_top_stocks('accuracy', top_n)
         top_sharpe = self.get_top_stocks('sharpe_ratio', top_n)
-        
+
         # 매수 신호가 있는 종목 가져오기
-        buy_signals = [result for code, result in self.analysis_results.items() 
+        buy_signals = [result for code, result in self.analysis_results.items()
                     if result['prediction_signal'] == "매수"]
-        
+
         # 신뢰도별로 정렬
         buy_signals_sorted = sorted(buy_signals, key=lambda x: x.get('prediction_confidence', 0), reverse=True)
-        
+
         # 보고서 생성
         report = []
         report.append("=" * 80)
         report.append(f"주식 분석 보고서 (분석 종목 수: {len(self.analysis_results)})")
         report.append("=" * 80)
-        
+
         # 요약 통계
         report.append("\n[요약 통계]")
         all_returns = [result['backtest']['total_return'] for result in self.analysis_results.values()]
         all_accuracies = [result['accuracy'] for result in self.analysis_results.values()]
         all_sharpes = [result['backtest']['sharpe_ratio'] for result in self.analysis_results.values()]
-        
+
         report.append(f"평균 백테스트 수익률: {np.mean(all_returns):.4f} ({np.mean(all_returns) * 100:.2f}%)")
         report.append(f"평균 모델 정확도: {np.mean(all_accuracies):.4f} ({np.mean(all_accuracies) * 100:.2f}%)")
         report.append(f"평균 샤프 비율: {np.mean(all_sharpes):.4f}")
         report.append(f"매수 신호 종목 수: {len(buy_signals)} ({len(buy_signals) / len(self.analysis_results) * 100:.2f}%)")
-        
+
         # 백테스트 수익률 상위 종목
         report.append("\n\n[백테스트 수익률 상위 종목]")
         report.append("순위\t종목코드\t종목명\t\t수익률\t정확도\t샤프비율\t예측신호")
         report.append("-" * 80)
-        
+
         for i, (_, row) in enumerate(top_backtest.iterrows(), 1):
             code = row['code']
             company = row['company']
@@ -1759,25 +1768,25 @@ class StockAnalyzer:
             accuracy = row['accuracy'] * 100
             sharpe = row['sharpe_ratio']
             signal = row['prediction_signal']
-            
+
             report.append(f"{i}\t{code}\t{company:<10}\t{backtest_return:.2f}%\t{accuracy:.2f}%\t{sharpe:.2f}\t{signal}")
-        
+
         # 매수 신호 종목 (신뢰도순)
         report.append("\n\n[매수 신호 종목 (신뢰도순)]")
         report.append("종목코드\t종목명\t\t신뢰도\t백테스트 수익률\t정확도")
         report.append("-" * 80)
-        
+
         for i, result in enumerate(buy_signals_sorted[:20], 1):
             code = result['stock_code']
             company = result.get('company_name', code)
             confidence = result.get('prediction_confidence', 0) * 100
             backtest_return = result['backtest']['total_return'] * 100
             accuracy = result['accuracy'] * 100
-            
+
             report.append(f"{code}\t{company:<10}\t{confidence:.2f}%\t{backtest_return:.2f}%\t{accuracy:.2f}%")
-        
+
         return "\n".join(report)
-    
+
 # 통합 데이터 소스 기능
 def integrate_multiple_data_sources(stock_code):
     """여러 데이터 소스를 통합하여 더 강력한 예측 성능 제공"""
@@ -1800,21 +1809,53 @@ def integrate_multiple_data_sources(stock_code):
     def merge_data_sources(yahoo_data, naver_data):
         if naver_data is None:
             return yahoo_data
-        
+
         # 실제 데이터 결합 로직 구현 필요
         # 이 부분은 두 데이터 소스의 형식에 따라 달라집니다
         return yahoo_data
 
     # Yahoo Finance 데이터 다운로드
     yahoo_data = download_yahoo_finance(stock_code)
-    
+
     # 네이버 금융 데이터 다운로드 (예시)
     naver_data = download_naver_finance(stock_code)
-    
+
     # 데이터 결합
     combined_data = merge_data_sources(yahoo_data, naver_data)
-    
+
     return combined_data
+
+    def analyze_in_batches(analyzer, stock_codes, batch_size=10, period='1y', prediction_period=5, workers=4):
+        """종목을 배치로 나누어 분석"""
+        import gc
+        all_results = {}
+        
+        # 배치로 나누기
+        codes_list = list(zip(stock_codes['code'], stock_codes['company']))
+        total_batches = (len(codes_list) + batch_size - 1) // batch_size
+        
+        for i in range(0, len(codes_list), batch_size):
+            batch = codes_list[i:i+batch_size]
+            batch_df = pd.DataFrame(batch, columns=['code', 'company'])
+            
+            print(f"\n배치 {i//batch_size + 1}/{total_batches} 처리 중... ({len(batch)}개 종목)")
+            
+            # 현재 배치 분석
+            batch_results = analyzer.analyze_all_stocks_parallel(
+                stock_codes=batch_df,
+                period=period,
+                prediction_period=prediction_period,
+                workers=workers
+            )
+            
+            # 결과 병합
+            all_results.update(batch_results)
+            
+            # 메모리 정리
+            gc.collect()
+            print(f"배치 {i//batch_size + 1} 완료, 현재까지 {len(all_results)}개 분석됨")
+        
+        return all_results
 
 if __name__ == "__main__":
     try:
@@ -1826,7 +1867,7 @@ if __name__ == "__main__":
         except ImportError:
             print("경고: html5lib 패키지가 설치되어 있지 않습니다.")
             print("pip install html5lib 명령어로 설치해주세요.")
-        
+
         # matplotlib 백엔드 설정
         import matplotlib
         matplotlib.use('Agg')
@@ -1834,61 +1875,70 @@ if __name__ == "__main__":
         import warnings
         warnings.filterwarnings("ignore", message="Dataset is empty")
         warnings.filterwarnings("ignore", message="contains only positive or negative samples")
-        
+
         # StockAnalyzer 인스턴스 생성
         analyzer = StockAnalyzer()
-        
+
         # KRX 종목 코드 가져오기
         krx_stocks = analyzer.get_krx_stock_codes()
         print(f"총 {len(krx_stocks)}개 종목 조회됨")
-        
+
         # 분석할 최대 종목 수 설정
         max_stocks = None  # 30  # 테스트용으로 30개, 전체 분석은 None으로 변경
-        
+
         # 모델 신뢰도 및 거래 임계값 설정
         buy_confidence_threshold = 0.55  # 매수 확신도 임계값 (55%)
         sell_confidence_threshold = 0.55  # 매도 확신도 임계값 (55%)
         min_accuracy = 0.55  # 최소 모델 정확도 (55%)
         min_win_rate = 0.5  # 최소 승률 (50%)
-        
+
         # 병렬 처리로 모든 종목 분석 (개선: 5년 데이터 사용)
-        results = analyzer.analyze_all_stocks_parallel(
+        # results = analyzer.analyze_all_stocks_parallel(
+        #     stock_codes=krx_stocks,
+        #     period='5y',  # 1y에서 5y로 변경
+        #     max_stocks=max_stocks,
+        #     prediction_period=5,
+        #     workers=4 # 작업자 수
+        # )
+
+        results = analyze_in_batches(
+            analyzer=analyzer,
             stock_codes=krx_stocks,
-            period='5y',  # 1y에서 5y로 변경
-            max_stocks=max_stocks,
+            batch_size=20,  # 각 배치당 20개 종목 (총배치 = 전체 종목 수 / 배치 크기 (2500/20))
+            period='1y',    # 데이터 기간 축소
             prediction_period=5,
-            workers=4
+            workers=4       # 작업자 수 제한
         )
-        
+
         # 결과 데이터프레임 생성
         results_data = []
         for code, result in results.items():
             if result is None:
                 continue
-                
+
             # 예측 신뢰도 및 방향 가져오기
             prediction_signal = result.get('prediction_signal', '')
             prediction_confidence = result.get('prediction_confidence', 0)
             accuracy = result.get('accuracy', 0)
             win_rate = result.get('backtest', {}).get('win_rate', 0)
-            
+
             # 거래 결정 (매수/매도/관망)
             trading_decision = "관망"
             action_reason = ""
-            
+
             # 매수 신호 (확신도, 정확도, 승률 모두 임계값 이상일 때)
-            if (prediction_signal == "매수" and 
+            if (prediction_signal == "매수" and
                 (prediction_confidence >= buy_confidence_threshold * 0.95 or  # 약간 낮춤 (더 많은 기회 포착)
                 (accuracy >= min_accuracy and win_rate >= min_win_rate))):
                 trading_decision = "매수"
                 action_reason = f"확신도({prediction_confidence:.2%})가 좋거나 모델 성능(정확도:{accuracy:.2%}, 승률:{win_rate:.2%})이 양호함"# 매도 신호 (확신도, 정확도, 승률 모두 임계값 이상일 때)
-            elif (prediction_signal == "매도" and 
-                  prediction_confidence >= sell_confidence_threshold and 
-                  accuracy >= min_accuracy and 
+            elif (prediction_signal == "매도" and
+                  prediction_confidence >= sell_confidence_threshold and
+                  accuracy >= min_accuracy and
                   win_rate >= min_win_rate):
                 trading_decision = "매도"
                 action_reason = f"확신도({prediction_confidence:.2%})가 높고 모델 성능(정확도:{accuracy:.2%}, 승률:{win_rate:.2%})이 좋음"
-            
+
             # 관망 (기준 미달)
             else:
                 reasons = []
@@ -1902,21 +1952,21 @@ if __name__ == "__main__":
                     action_reason = ", ".join(reasons)
                 else:
                     action_reason = "기준 미달"
-            
+
             # 매수 후 목표가 및 손절가 계산
             current_price = result.get('latest_price', 0)
             avg_range = result.get('backtest', {}).get('avg_daily_range', 0)
-            
+
             if avg_range == 0:  # avg_daily_range가 없으면 현재가의 3% 사용
                 avg_range = current_price * 0.03
-            
+
             # 매수 시나리오: 익절가/손절가 설정
             target_price = current_price * 1.1  # 10% 상승 목표
             stop_loss = current_price * 0.95  # 5% 하락 손절
-            
+
             # 예상 보유 기간
             holding_period = "5-10 거래일" if prediction_signal == "매수" else "즉시 매도"
-            
+
             # 필요한 데이터 추출
             data = {
                 '종목코드': code,
@@ -1935,22 +1985,22 @@ if __name__ == "__main__":
                 '샤프비율': result['backtest']['sharpe_ratio'] if 'backtest' in result else 0
             }
             results_data.append(data)
-        
+
         # 데이터프레임 생성
         all_results_df = pd.DataFrame(results_data)
-        
+
         # 거래 결정별로 분류
         buy_recommendations = all_results_df[all_results_df['거래결정'] == "매수"].sort_values('예측확신도', ascending=False)
         sell_recommendations = all_results_df[all_results_df['거래결정'] == "매도"].sort_values('예측확신도', ascending=False)
         hold_recommendations = all_results_df[all_results_df['거래결정'] == "관망"]
-        
+
         # 결과 저장
         today_date = datetime.now().strftime("%Y%m%d")
 
         # 개선: 최적화된 결과 저장
         optimized_file = f"optimized_signals_{today_date}.csv"
         analyzer.save_optimized_results(all_results_df, optimized_file)
-        
+
         print("\n상위 20개 최적화 종목 추출 중...")
         # CSV 파일 로드
         df = pd.read_csv(optimized_file, encoding='utf-8-sig')
@@ -1993,61 +2043,61 @@ if __name__ == "__main__":
             buy_file = f"buy_signals_{today_date}.csv"
             buy_recommendations.to_csv(buy_file, index=False, encoding='utf-8-sig')
             print(f"\n매수 추천 종목 {len(buy_recommendations)}개가 {buy_file}에 저장되었습니다.")
-            
+
             # 콘솔에 매수 추천 상위 종목 출력
             print("\n" + "="*100)
             print(f"매수 추천 상위 종목 (총 {len(buy_recommendations)}개)")
             print("="*100)
-            
+
             display_cols = ['종목코드', '종목명', '현재가', '예측확신도', '목표가', '손절가', '예상보유기간', '정확도', '승률']
             top_buys = buy_recommendations[display_cols].head(min(10, len(buy_recommendations)))
-            
+
             # 출력 형식 지정
             for col in ['예측확신도', '정확도', '승률']:
                 if col in top_buys.columns:
                     top_buys[col] = top_buys[col].apply(lambda x: f"{x:.2%}")
-            
+
             for col in ['현재가', '목표가', '손절가']:
                 if col in top_buys.columns:
                     top_buys[col] = top_buys[col].apply(lambda x: f"{int(x):,}" if pd.notnull(x) else "")
-            
+
             print(top_buys.to_string(index=False))
         else:
             print("\n매수 추천 종목이 없습니다.")
-        
+
         # 2. 매도 추천 종목 저장
         if len(sell_recommendations) > 0:
             sell_file = f"sell_signals_{today_date}.csv"
             sell_recommendations.to_csv(sell_file, index=False, encoding='utf-8-sig')
             print(f"\n매도 추천 종목 {len(sell_recommendations)}개가 {sell_file}에 저장되었습니다.")
-            
+
             # 콘솔에 매도 추천 상위 종목 출력
             print("\n" + "="*100)
             print(f"매도 추천 상위 종목 (총 {len(sell_recommendations)}개)")
             print("="*100)
-            
+
             display_cols = ['종목코드', '종목명', '현재가', '예측확신도', '정확도', '승률']
             top_sells = sell_recommendations[display_cols].head(min(10, len(sell_recommendations)))
-            
+
             # 출력 형식 지정
             for col in ['예측확신도', '정확도', '승률']:
                 if col in top_sells.columns:
                     top_sells[col] = top_sells[col].apply(lambda x: f"{x:.2%}")
-            
+
             if '현재가' in top_sells.columns:
                 top_sells['현재가'] = top_sells['현재가'].apply(lambda x: f"{int(x):,}")
-            
+
             print(top_sells.to_string(index=False))
         else:
             print("\n매도 추천 종목이 없습니다.")
-        
+
         # 3. 전체 분석 결과 저장
         all_results_file = f"all_stock_analysis_{today_date}.csv"
         all_results_df.to_csv(all_results_file, index=False, encoding='utf-8-sig')
         print(f"\n전체 분석 결과 {len(all_results_df)}개가 {all_results_file}에 저장되었습니다.")
-        
+
         print("\n분석 및 거래 신호 생성 완료!")
-        
+
     except Exception as e:
         print(f"\n오류 발생: {e}")
         import traceback
